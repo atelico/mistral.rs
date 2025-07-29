@@ -27,10 +27,10 @@ license = "MIT"
 rust-version = "1.82"
 
 [workspace.dependencies]
-candle-core = { git = "https://github.com/atelico/candle.git", version = "0.9.1", rev = "88a35789ae05e0d2e8ff212a3146e65b99296a61" }
-candle-nn = { git = "https://github.com/atelico/candle.git", version = "0.9.1", rev = "88a35789ae05e0d2e8ff212a3146e65b99296a61" }
-candle-flash-attn-v3 = { git = "https://github.com/atelico/candle.git", version = "0.9.1", rev = "88a35789ae05e0d2e8ff212a3146e65b99296a61" }
-candle-flash-attn = { git = "https://github.com/atelico/candle.git", version = "0.9.1", rev = "88a35789ae05e0d2e8ff212a3146e65b99296a61" }
+candle-core = { git = "https://github.com/atelico/candle.git", version = "0.9.1", rev = "bb6fdb6fb6195b84e3c773f499a93e051d007b98" }
+candle-nn = { git = "https://github.com/atelico/candle.git", version = "0.9.1", rev = "bb6fdb6fb6195b84e3c773f499a93e051d007b98" }
+candle-flash-attn-v3 = { git = "https://github.com/atelico/candle.git", version = "0.9.1", rev = "bb6fdb6fb6195b84e3c773f499a93e051d007b98" }
+candle-flash-attn = { git = "https://github.com/atelico/candle.git", version = "0.9.1", rev = "bb6fdb6fb6195b84e3c773f499a93e051d007b98" }
 # candle-core = { path = "../candle/candle-core" }
 # candle-nn = { path = "../candle/candle-nn" }
 # candle-flash-attn-v3 = { path = "../candle/candle-flash-attn-v3" }
