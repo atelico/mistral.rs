@@ -17,6 +17,8 @@ mod sampling;
 mod speculative;
 mod speech;
 mod vision;
+#[cfg(feature = "metal")]
+use objc::rc::autoreleasepool;
 
 pub use super::diffusion_models::DiffusionGenerationParams;
 use crate::amoe::{AnyMoeConfig, AnyMoeExpertType, AnyMoeTrainingInputs, AnyMoeTrainingResult};
@@ -448,7 +450,12 @@ pub trait Pipeline:
                     }
 
                     let start = Instant::now();
+                    #[cfg(feature = "metal")]
+                    let raw_logits =
+                        autoreleasepool(|| self.forward_inputs(inputs, return_raw_logits))?;
+                    #[cfg(not(feature = "metal"))]
                     let raw_logits = self.forward_inputs(inputs, return_raw_logits)?;
+
                     let end = Instant::now();
                     exec_duration += end.duration_since(start);
 
@@ -654,7 +661,12 @@ pub trait Pipeline:
                     } = inputs.map_err(candle_core::Error::msg)?;
 
                     let start = Instant::now();
+                    #[cfg(feature = "metal")]
+                    let raw_logits =
+                        autoreleasepool(|| self.forward_inputs(inputs, return_raw_logits))?;
+                    #[cfg(not(feature = "metal"))]
                     let raw_logits = self.forward_inputs(inputs, return_raw_logits)?;
+
                     let end = Instant::now();
                     exec_duration += end.duration_since(start);
 
