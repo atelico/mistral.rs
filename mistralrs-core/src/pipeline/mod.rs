@@ -623,20 +623,22 @@ pub trait Pipeline:
                         &blocks_to_copy,
                     )?;
 
-                let inputs_iter = self.get_processor().inputs_processor().process_inputs(
-                    self.tokenizer(),
-                    input_seqs,
-                    is_prompt,
-                    self.get_metadata().is_xlora,
-                    &self.device(),
-                    self.get_metadata().no_kv_cache,
-                    None,
-                    return_raw_logits,
-                    self.get_input_processor_config(),
-                    Some(metadata),
-                    self.get_metadata().prompt_chunksize,
-                    self.device_mapper(),
-                );
+                let inputs_iter = autorelease_block!({
+                    self.get_processor().inputs_processor().process_inputs(
+                        self.tokenizer(),
+                        input_seqs,
+                        is_prompt,
+                        self.get_metadata().is_xlora,
+                        &self.device(),
+                        self.get_metadata().no_kv_cache,
+                        None,
+                        return_raw_logits,
+                        self.get_input_processor_config(),
+                        Some(metadata),
+                        self.get_metadata().prompt_chunksize,
+                        self.device_mapper(),
+                    )
+                });
 
                 let mut logits = vec![None; input_seqs.len()];
                 let prompt_chunksize = self
