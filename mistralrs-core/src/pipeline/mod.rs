@@ -17,8 +17,6 @@ mod sampling;
 mod speculative;
 mod speech;
 mod vision;
-#[cfg(feature = "metal")]
-use objc::rc::autoreleasepool;
 
 pub use super::diffusion_models::DiffusionGenerationParams;
 use crate::amoe::{AnyMoeConfig, AnyMoeExpertType, AnyMoeTrainingInputs, AnyMoeTrainingResult};
@@ -68,7 +66,7 @@ use tokenizers::Tokenizer;
 pub use vision::{VisionLoader, VisionLoaderBuilder, VisionSpecificConfig};
 
 use anyhow::Result;
-use candle_core::{DType, Device, IndexOp, Tensor, Var};
+use candle_core::{autorelease_block, DType, Device, IndexOp, Tensor, Var};
 
 use crate::sequence::Sequence;
 
@@ -398,20 +396,22 @@ pub trait Pipeline:
     ) -> Result<Duration, candle_core::Error> {
         match backend_metadata {
             CacheBackendMetadata::DefaultInstructions { pre_op, post_op } => {
-                let inputs_iter = self.get_processor().inputs_processor().process_inputs(
-                    self.tokenizer(),
-                    input_seqs,
-                    is_prompt,
-                    self.get_metadata().is_xlora,
-                    &self.device(),
-                    self.get_metadata().no_kv_cache,
-                    None,
-                    return_raw_logits,
-                    self.get_input_processor_config(),
-                    None,
-                    self.get_metadata().prompt_chunksize,
-                    self.device_mapper(),
-                );
+                let inputs_iter = autorelease_block!({
+                    self.get_processor().inputs_processor().process_inputs(
+                        self.tokenizer(),
+                        input_seqs,
+                        is_prompt,
+                        self.get_metadata().is_xlora,
+                        &self.device(),
+                        self.get_metadata().no_kv_cache,
+                        None,
+                        return_raw_logits,
+                        self.get_input_processor_config(),
+                        None,
+                        self.get_metadata().prompt_chunksize,
+                        self.device_mapper(),
+                    )
+                });
 
                 let mut logits = vec![None; input_seqs.len()];
                 let prompt_chunksize = self
@@ -450,11 +450,9 @@ pub trait Pipeline:
                     }
 
                     let start = Instant::now();
-                    #[cfg(feature = "metal")]
+
                     let raw_logits =
-                        autoreleasepool(|| self.forward_inputs(inputs, return_raw_logits))?;
-                    #[cfg(not(feature = "metal"))]
-                    let raw_logits = self.forward_inputs(inputs, return_raw_logits)?;
+                        autorelease_block!({ self.forward_inputs(inputs, return_raw_logits) })?;
 
                     let end = Instant::now();
                     exec_duration += end.duration_since(start);
@@ -661,11 +659,9 @@ pub trait Pipeline:
                     } = inputs.map_err(candle_core::Error::msg)?;
 
                     let start = Instant::now();
-                    #[cfg(feature = "metal")]
+
                     let raw_logits =
-                        autoreleasepool(|| self.forward_inputs(inputs, return_raw_logits))?;
-                    #[cfg(not(feature = "metal"))]
-                    let raw_logits = self.forward_inputs(inputs, return_raw_logits)?;
+                        autorelease_block!({ self.forward_inputs(inputs, return_raw_logits) })?;
 
                     let end = Instant::now();
                     exec_duration += end.duration_since(start);

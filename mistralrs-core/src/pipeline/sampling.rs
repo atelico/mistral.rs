@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use candle_core::{DType, Result, Tensor};
+use candle_core::{autorelease_block, DType, Result, Tensor};
 use rand_isaac::Isaac64Rng;
 
 use crate::{
@@ -316,16 +316,18 @@ pub async fn sample_and_add_toks(
 
     let sampling_futures: Vec<_> = std::iter::zip(logits_seq, seqs.iter_mut())
         .map(|(logits_per_seq, seq)| {
-            let return_logprobs = seq.return_logprobs();
-            sample_sequence(
-                logits_per_seq,
-                seq,
-                return_logprobs,
-                rng.clone(),
-                use_async_pool,
-                false,
-                use_async_pool,
-            )
+            autorelease_block!({
+                let return_logprobs = seq.return_logprobs();
+                sample_sequence(
+                    logits_per_seq,
+                    seq,
+                    return_logprobs,
+                    rng.clone(),
+                    use_async_pool,
+                    false,
+                    use_async_pool,
+                )
+            })
         })
         .collect();
     let sampled_vec = futures::future::join_all(sampling_futures).await;
