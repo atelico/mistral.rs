@@ -13,6 +13,7 @@ use crate::{
     sequence::{SeqStepType, StopReason},
     tools, CompletionResponse, SchedulerConfig, DEBUG,
 };
+use candle_core::autoreleasepool;
 use interprocess::local_socket::{traits::Listener, ListenerOptions};
 use llguidance::ParserFactory;
 pub use logger::IntervalLogger;
@@ -205,6 +206,7 @@ impl Engine {
         let rng = Arc::new(std::sync::Mutex::new(Isaac64Rng::seed_from_u64(SEED)));
         let mut last_completion_ids: Vec<usize> = vec![];
         'lp: loop {
+            let _pool = autoreleasepool();
             if matches!(
                 ENGINE_INSTRUCTIONS
                     .lock()
@@ -217,6 +219,8 @@ impl Engine {
             }
 
             while let Ok(request) = get_mut_arcmutex!(self.rx).try_recv() {
+                let _req_pool = autoreleasepool();
+
                 self.replicate_request_to_daemons(&request);
                 if matches!(request, Request::Terminate) {
                     break 'lp;

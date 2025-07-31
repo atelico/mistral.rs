@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use candle_core::{DType, Result, Tensor};
+use candle_core::{autorelease_block, DType, Result, Tensor};
 use rand_isaac::Isaac64Rng;
 
 use crate::{
@@ -416,7 +416,9 @@ pub async fn sample_sequence(
     };
     let second_logprobs_response = match bias_if_not_allowed {
         Some(acc) => {
-            let new_logits = (&logits + Tensor::from_slice(&acc, acc.len(), logits.device())?)?;
+            let new_logits = autorelease_block!({
+                &logits + Tensor::from_slice(&acc, acc.len(), logits.device())?
+            })?;
 
             let ctx_clone = seq.get_toks().to_vec();
             let rng_clone = rng.clone();
