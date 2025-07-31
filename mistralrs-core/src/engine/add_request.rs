@@ -6,7 +6,7 @@ use crate::{
     tools::{ToolCallingMatcher, ToolChoice},
     ModelCategory, RequestMessage, Response,
 };
-use candle_core::Tensor;
+use candle_core::{autorelease_block, Tensor};
 use either::Either;
 use std::{
     ops::Deref,
@@ -412,75 +412,62 @@ impl Engine {
                 .eos_tok
                 .clone();
 
-            let seq_preallocated_cache = if get_mut_arcmutex!(self.pipeline).do_preallocated_cache()
-            {
-                let metadata = get_mut_arcmutex!(self.pipeline).get_metadata();
-                let model_metadata = metadata
-                    .model_metadata
-                    .as_ref()
-                    .expect("If a model has a NormalCache it must have a model metadata");
-                let n_tokens = prompt_tokens.len();
-                let required_blocks = n_tokens.div_ceil(NormalCache::CACHE_GROW_SIZE);
-                let max_seq_len = required_blocks * NormalCache::CACHE_GROW_SIZE;
-                let k_shape = (
-                    1usize,
-                    model_metadata.num_kv_heads(),
-                    max_seq_len,
-                    model_metadata.k_head_dim(),
-                );
-                let v_shape = (
-                    1usize,
-                    model_metadata.num_kv_heads(),
-                    max_seq_len,
-                    model_metadata.v_head_dim(),
-                );
-                let dtype = get_mut_arcmutex!(self.pipeline)
-                    .get_metadata()
-                    .activation_dtype;
+            let seq_preallocated_cache_result: Result<
+                Option<(Tensor, Tensor)>,
+                candle_core::Error,
+            > = autorelease_block!({
+                if get_mut_arcmutex!(self.pipeline).do_preallocated_cache() {
+                    let metadata = get_mut_arcmutex!(self.pipeline).get_metadata();
+                    let model_metadata = metadata
+                        .model_metadata
+                        .as_ref()
+                        .expect("If a model has a NormalCache it must have a model metadata");
+                    let n_tokens = prompt_tokens.len();
+                    let required_blocks = n_tokens.div_ceil(NormalCache::CACHE_GROW_SIZE);
+                    let max_seq_len = required_blocks * NormalCache::CACHE_GROW_SIZE;
+                    let k_shape = (
+                        1usize,
+                        model_metadata.num_kv_heads(),
+                        max_seq_len,
+                        model_metadata.k_head_dim(),
+                    );
+                    let v_shape = (
+                        1usize,
+                        model_metadata.num_kv_heads(),
+                        max_seq_len,
+                        model_metadata.v_head_dim(),
+                    );
+                    let dtype = get_mut_arcmutex!(self.pipeline)
+                        .get_metadata()
+                        .activation_dtype;
 
-                let k_seq_cache = {
                     let k_seq_cache =
-                        Tensor::zeros(k_shape, dtype, &get_mut_arcmutex!(self.pipeline).device());
-                    match k_seq_cache {
-                        Ok(x) => x,
-                        Err(_) => {
-                            request
-                                .response
-                                .send(Response::InternalError(
-                                    "Failed to allocate preallocated KV cache."
-                                        .to_string()
-                                        .into(),
-                                ))
-                                .await
-                                .unwrap_or_else(|_| warn!("Receiver disconnected"));
-                            return;
-                        }
-                    }
-                };
-                let v_seq_cache = if k_shape == v_shape {
-                    k_seq_cache.clone()
+                        Tensor::zeros(k_shape, dtype, &get_mut_arcmutex!(self.pipeline).device())
+                            .unwrap();
+                    let v_seq_cache = if k_shape == v_shape {
+                        k_seq_cache.clone()
+                    } else {
+                        Tensor::zeros(v_shape, dtype, &get_mut_arcmutex!(self.pipeline).device())
+                            .unwrap()
+                    };
+                    Ok(Some((k_seq_cache, v_seq_cache)))
                 } else {
-                    let v_seq_cache =
-                        Tensor::zeros(v_shape, dtype, &get_mut_arcmutex!(self.pipeline).device());
-                    match v_seq_cache {
-                        Ok(x) => x,
-                        Err(_) => {
-                            request
-                                .response
-                                .send(Response::InternalError(
-                                    "Failed to allocate preallocated KV cache."
-                                        .to_string()
-                                        .into(),
-                                ))
-                                .await
-                                .unwrap_or_else(|_| warn!("Receiver disconnected"));
-                            return;
-                        }
-                    }
-                };
-                Some((k_seq_cache, v_seq_cache))
-            } else {
-                None
+                    Ok(None)
+                }
+            });
+
+            let seq_preallocated_cache = match seq_preallocated_cache_result {
+                Ok(cache) => cache,
+                Err(_) => {
+                    request
+                        .response
+                        .send(Response::InternalError(
+                            "Failed to allocate preallocated KV cache.".into(),
+                        ))
+                        .await
+                        .unwrap_or_else(|_| warn!("Receiver disconnected"));
+                    return;
+                }
             };
 
             let now = SystemTime::now()
@@ -546,44 +533,48 @@ impl Engine {
             }
 
             let prefill_cache = handle_seq_error!(
-                get_mut_arcmutex!(self.prefix_cacher).search_for_matching_cache(
-                    seq.get_toks(),
-                    seq.image_hashes(),
-                    seq.audio_hashes(),
-                ),
+                autorelease_block!({
+                    get_mut_arcmutex!(self.prefix_cacher).search_for_matching_cache(
+                        seq.get_toks(),
+                        seq.image_hashes(),
+                        seq.audio_hashes(),
+                    )
+                }),
                 request.response
             );
 
-            seq = match prefill_cache.clone() {
-                Some(MatchingCache::Normal {
-                    normal,
-                    images_to_keep,
-                    audios_to_keep,
-                    toks,
-                    offset,
-                }) => {
-                    self.logger.add_prefix_cache_hit();
+            seq = autorelease_block!({
+                match prefill_cache.clone() {
+                    Some(MatchingCache::Normal {
+                        normal,
+                        images_to_keep,
+                        audios_to_keep,
+                        toks,
+                        offset,
+                    }) => {
+                        self.logger.add_prefix_cache_hit();
 
-                    seq.keep_num_images(images_to_keep);
-                    seq.keep_num_audios(audios_to_keep);
-                    seq.prefill_v2_normal(normal, toks, offset)
-                }
-                Some(MatchingCache::Paged {
-                    logical_blocks,
-                    physical_blocks,
-                    images_to_keep,
-                    audios_to_keep,
-                    toks,
-                    offset,
-                }) => {
-                    self.logger.add_prefix_cache_hit();
+                        seq.keep_num_images(images_to_keep);
+                        seq.keep_num_audios(audios_to_keep);
+                        seq.prefill_v2_normal(normal, toks, offset)
+                    }
+                    Some(MatchingCache::Paged {
+                        logical_blocks,
+                        physical_blocks,
+                        images_to_keep,
+                        audios_to_keep,
+                        toks,
+                        offset,
+                    }) => {
+                        self.logger.add_prefix_cache_hit();
 
-                    seq.keep_num_images(images_to_keep);
-                    seq.keep_num_audios(audios_to_keep);
-                    seq.prefill_v2_paged(logical_blocks, physical_blocks, toks, offset)
+                        seq.keep_num_images(images_to_keep);
+                        seq.keep_num_audios(audios_to_keep);
+                        seq.prefill_v2_paged(logical_blocks, physical_blocks, toks, offset)
+                    }
+                    None => seq,
                 }
-                None => seq,
-            };
+            });
 
             *get_mut_arcmutex!(self.id) += 1;
             get_mut_arcmutex!(self.scheduler).add_seq(seq);
