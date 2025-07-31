@@ -41,7 +41,7 @@ use crate::{
     PagedAttentionConfig, Pipeline, Topology, TryIntoDType, GLOBAL_HF_CACHE,
 };
 use anyhow::Result;
-use candle_core::{Device, Tensor, Var};
+use candle_core::{autorelease_block, Device, Tensor, Var};
 use hf_hub::Cache;
 use hf_hub::{api::sync::ApiBuilder, Repo, RepoType};
 use indicatif::MultiProgress;
@@ -310,639 +310,651 @@ impl Loader for NormalLoader {
         mut in_situ_quant: Option<IsqType>,
         mut paged_attn_config: Option<PagedAttentionConfig>,
     ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
-        let config = std::fs::read_to_string(paths.get_config_filename())?;
+        autorelease_block!({
+            let config = std::fs::read_to_string(paths.get_config_filename())?;
 
-        if !self.inner.supports_paged_attention(&config)? {
-            paged_attn_config = None;
-        }
-
-        // Apply default prompt size here
-        let prompt_chunksize = self
-            .config
-            .prompt_chunksize
-            .unwrap_or(DEFAULT_PROMPT_CHUNK_SIZE.try_into().unwrap())
-            .get();
-
-        info!("Prompt chunk size is {prompt_chunksize}.",);
-
-        let use_nccl = mistralrs_quant::distributed::use_nccl();
-
-        let available_devices = if let Ok(payload) = env::var(distributed::IS_DAEMON_FLAG) {
-            let payload: WorkerTransferData = serde_json::from_str(&payload)?;
-            let WorkerTransferData::Init { id: _, worker_rank } = payload;
-            vec![candle_core::Device::new_cuda(worker_rank + 1)?]
-        } else if use_nccl {
-            vec![candle_core::Device::new_cuda(0)?]
-        } else {
-            device_map::get_all_similar_devices(device)?
-        };
-        let device = if use_nccl || cfg!(feature = "ring") {
-            available_devices[0].clone()
-        } else {
-            device.clone()
-        };
-
-        // If auto, convert to Map if not using nccl
-        if use_nccl || cfg!(feature = "ring") {
-            mapper = DeviceMapSetting::DummyNccl {
-                nm_device: available_devices[0].clone(),
-            };
-        } else if let DeviceMapSetting::Auto(params) = mapper.clone() {
-            // Initial dtype
-            let dtype = dtype.try_into_dtype(&available_devices.iter().collect::<Vec<_>>())?;
-
-            // Disable ISQ if we are loading a prequantized model.
-            if QuantizationConfigShim::get_quant_config_pack_factor(&config, dtype)? != 1 {
-                in_situ_quant = None;
+            if !self.inner.supports_paged_attention(&config)? {
+                paged_attn_config = None;
             }
 
-            // ISQ or UQFF: quantized path
-            // Match logic below where UQFF has priority
-            let (layer_sizes_in_bytes, non_mapped_size_in_bytes, total_model_size_in_bytes) =
-                if let Some(serialized) = &*self.from_uqff.read().unwrap() {
-                    let weight_pack_factor = {
-                        let ser_artifacts = unsafe {
-                            candle_core::safetensors::MmapedSafetensors::multi(serialized)?
-                        };
-                        let mut total_pack_factors = 0;
-                        let total_tensors = ser_artifacts.tensors().len();
-                        for (_, artifact) in ser_artifacts.tensors() {
-                            let artifact = artifact.data();
-                            // NOTE(EricLBuehler): isq type is ALWAYS byte 4 (5th) of the tensor.
-                            let isq_type = artifact[mistralrs_quant::UQFF_QUANT_TYPE_OFFSET];
-                            let pack_factor = match QuantizedSerdeType::try_from(isq_type as usize)?
-                            {
-                                QuantizedSerdeType::Hqq => {
-                                    HqqLayer::get_isq_type_from_uqff(Cow::Borrowed(artifact))?
-                                        .pack_factor(dtype)
-                                }
-                                QuantizedSerdeType::Gguf => {
-                                    GgufMatMul::get_isq_type_from_uqff(Cow::Borrowed(artifact))?
-                                        .pack_factor(dtype)
-                                }
-                                QuantizedSerdeType::Fp8 => IsqType::F8E4M3.pack_factor(dtype),
-                                QuantizedSerdeType::Unquant => 1,
-                                QuantizedSerdeType::Afq => {
-                                    AfqLayer::get_isq_type_from_uqff(Cow::Borrowed(artifact))?
-                                        .pack_factor(dtype)
-                                }
-                            };
-                            total_pack_factors += pack_factor;
-                        }
+            // Apply default prompt size here
+            let prompt_chunksize = self
+                .config
+                .prompt_chunksize
+                .unwrap_or(DEFAULT_PROMPT_CHUNK_SIZE.try_into().unwrap())
+                .get();
 
-                        total_pack_factors / total_tensors
+            info!("Prompt chunk size is {prompt_chunksize}.",);
+
+            let use_nccl = mistralrs_quant::distributed::use_nccl();
+
+            let available_devices = if let Ok(payload) = env::var(distributed::IS_DAEMON_FLAG) {
+                let payload: WorkerTransferData = serde_json::from_str(&payload)?;
+                let WorkerTransferData::Init { id: _, worker_rank } = payload;
+                vec![candle_core::Device::new_cuda(worker_rank + 1)?]
+            } else if use_nccl {
+                vec![candle_core::Device::new_cuda(0)?]
+            } else {
+                device_map::get_all_similar_devices(device)?
+            };
+            let device = if use_nccl || cfg!(feature = "ring") {
+                available_devices[0].clone()
+            } else {
+                device.clone()
+            };
+
+            // If auto, convert to Map if not using nccl
+            if use_nccl || cfg!(feature = "ring") {
+                mapper = DeviceMapSetting::DummyNccl {
+                    nm_device: available_devices[0].clone(),
+                };
+            } else if let DeviceMapSetting::Auto(params) = mapper.clone() {
+                // Initial dtype
+                let dtype = dtype.try_into_dtype(&available_devices.iter().collect::<Vec<_>>())?;
+
+                // Disable ISQ if we are loading a prequantized model.
+                if QuantizationConfigShim::get_quant_config_pack_factor(&config, dtype)? != 1 {
+                    in_situ_quant = None;
+                }
+
+                // ISQ or UQFF: quantized path
+                // Match logic below where UQFF has priority
+                let (layer_sizes_in_bytes, non_mapped_size_in_bytes, total_model_size_in_bytes) =
+                    if let Some(serialized) = &*self.from_uqff.read().unwrap() {
+                        let weight_pack_factor = {
+                            let ser_artifacts = unsafe {
+                                candle_core::safetensors::MmapedSafetensors::multi(serialized)?
+                            };
+                            let mut total_pack_factors = 0;
+                            let total_tensors = ser_artifacts.tensors().len();
+                            for (_, artifact) in ser_artifacts.tensors() {
+                                let artifact = artifact.data();
+                                // NOTE(EricLBuehler): isq type is ALWAYS byte 4 (5th) of the tensor.
+                                let isq_type = artifact[mistralrs_quant::UQFF_QUANT_TYPE_OFFSET];
+                                let pack_factor =
+                                    match QuantizedSerdeType::try_from(isq_type as usize)? {
+                                        QuantizedSerdeType::Hqq => {
+                                            HqqLayer::get_isq_type_from_uqff(Cow::Borrowed(
+                                                artifact,
+                                            ))?
+                                            .pack_factor(dtype)
+                                        }
+                                        QuantizedSerdeType::Gguf => {
+                                            GgufMatMul::get_isq_type_from_uqff(Cow::Borrowed(
+                                                artifact,
+                                            ))?
+                                            .pack_factor(dtype)
+                                        }
+                                        QuantizedSerdeType::Fp8 => {
+                                            IsqType::F8E4M3.pack_factor(dtype)
+                                        }
+                                        QuantizedSerdeType::Unquant => 1,
+                                        QuantizedSerdeType::Afq => {
+                                            AfqLayer::get_isq_type_from_uqff(Cow::Borrowed(
+                                                artifact,
+                                            ))?
+                                            .pack_factor(dtype)
+                                        }
+                                    };
+                                total_pack_factors += pack_factor;
+                            }
+
+                            total_pack_factors / total_tensors
+                        };
+
+                        let layer_sizes_in_bytes = self.inner.layer_sizes_in_bytes(
+                            &config,
+                            dtype,
+                            weight_pack_factor,
+                            None,
+                        )?;
+                        let non_mapped_size_in_bytes = self.inner.non_mapped_size_in_bytes(
+                            &config,
+                            dtype,
+                            weight_pack_factor,
+                            None,
+                        )?;
+                        let layer_sizes_sum = layer_sizes_in_bytes.iter().sum::<usize>();
+                        (
+                            layer_sizes_in_bytes,
+                            non_mapped_size_in_bytes,
+                            layer_sizes_sum + non_mapped_size_in_bytes,
+                        )
+                    } else if let Some(isq) = in_situ_quant {
+                        let weight_pack_factor = isq.pack_factor(dtype);
+                        let layer_sizes_in_bytes = self.inner.layer_sizes_in_bytes(
+                            &config,
+                            dtype,
+                            weight_pack_factor,
+                            None,
+                        )?;
+                        let non_mapped_size_in_bytes = self.inner.non_mapped_size_in_bytes(
+                            &config,
+                            dtype,
+                            weight_pack_factor,
+                            None,
+                        )?;
+                        let layer_sizes_sum = layer_sizes_in_bytes.iter().sum::<usize>();
+                        (
+                            layer_sizes_in_bytes,
+                            non_mapped_size_in_bytes,
+                            layer_sizes_sum + non_mapped_size_in_bytes,
+                        )
+                    } else {
+                        // Be sure to get the weight pack factor here; we might be loading a prequantized model.
+                        let weight_pack_factor =
+                            QuantizationConfigShim::get_quant_config_pack_factor(&config, dtype)?;
+                        let layer_sizes_in_bytes = self.inner.layer_sizes_in_bytes(
+                            &config,
+                            dtype,
+                            weight_pack_factor,
+                            None,
+                        )?;
+                        let non_mapped_size_in_bytes = self.inner.non_mapped_size_in_bytes(
+                            &config,
+                            dtype,
+                            weight_pack_factor,
+                            None,
+                        )?;
+                        let layer_sizes_sum = layer_sizes_in_bytes.iter().sum::<usize>();
+                        (
+                            layer_sizes_in_bytes,
+                            non_mapped_size_in_bytes,
+                            layer_sizes_sum + non_mapped_size_in_bytes,
+                        )
                     };
 
-                    let layer_sizes_in_bytes = self.inner.layer_sizes_in_bytes(
-                        &config,
-                        dtype,
-                        weight_pack_factor,
-                        None,
-                    )?;
-                    let non_mapped_size_in_bytes = self.inner.non_mapped_size_in_bytes(
-                        &config,
-                        dtype,
-                        weight_pack_factor,
-                        None,
-                    )?;
-                    let layer_sizes_sum = layer_sizes_in_bytes.iter().sum::<usize>();
-                    (
-                        layer_sizes_in_bytes,
-                        non_mapped_size_in_bytes,
-                        layer_sizes_sum + non_mapped_size_in_bytes,
-                    )
-                } else if let Some(isq) = in_situ_quant {
-                    let weight_pack_factor = isq.pack_factor(dtype);
-                    let layer_sizes_in_bytes = self.inner.layer_sizes_in_bytes(
-                        &config,
-                        dtype,
-                        weight_pack_factor,
-                        None,
-                    )?;
-                    let non_mapped_size_in_bytes = self.inner.non_mapped_size_in_bytes(
-                        &config,
-                        dtype,
-                        weight_pack_factor,
-                        None,
-                    )?;
-                    let layer_sizes_sum = layer_sizes_in_bytes.iter().sum::<usize>();
-                    (
-                        layer_sizes_in_bytes,
-                        non_mapped_size_in_bytes,
-                        layer_sizes_sum + non_mapped_size_in_bytes,
-                    )
-                } else {
-                    // Be sure to get the weight pack factor here; we might be loading a prequantized model.
-                    let weight_pack_factor =
-                        QuantizationConfigShim::get_quant_config_pack_factor(&config, dtype)?;
-                    let layer_sizes_in_bytes = self.inner.layer_sizes_in_bytes(
-                        &config,
-                        dtype,
-                        weight_pack_factor,
-                        None,
-                    )?;
-                    let non_mapped_size_in_bytes = self.inner.non_mapped_size_in_bytes(
-                        &config,
-                        dtype,
-                        weight_pack_factor,
-                        None,
-                    )?;
-                    let layer_sizes_sum = layer_sizes_in_bytes.iter().sum::<usize>();
-                    (
-                        layer_sizes_in_bytes,
-                        non_mapped_size_in_bytes,
-                        layer_sizes_sum + non_mapped_size_in_bytes,
-                    )
-                };
+                let new = auto_device_map::get_device_layers(
+                    &*self.inner,
+                    &config,
+                    self.inner.num_layers(&config)?,
+                    layer_sizes_in_bytes,
+                    non_mapped_size_in_bytes,
+                    total_model_size_in_bytes,
+                    &available_devices,
+                    dtype,
+                    &params,
+                    prompt_chunksize,
+                    paged_attn_config.as_ref(),
+                )?;
+                mapper = DeviceMapSetting::Map(new);
+            }
 
-            let new = auto_device_map::get_device_layers(
-                &*self.inner,
-                &config,
+            let pipeline_mapper = mapper.into_mapper(
                 self.inner.num_layers(&config)?,
-                layer_sizes_in_bytes,
-                non_mapped_size_in_bytes,
-                total_model_size_in_bytes,
-                &available_devices,
-                dtype,
-                &params,
-                prompt_chunksize,
-                paged_attn_config.as_ref(),
-            )?;
-            mapper = DeviceMapSetting::Map(new);
-        }
-
-        let pipeline_mapper = mapper.into_mapper(
-            self.inner.num_layers(&config)?,
-            &device,
-            self.config.topology.as_ref(),
-        )?;
-        let mapper = mapper.into_mapper(
-            self.inner.num_layers(&config)?,
-            &device,
-            self.config.topology.as_ref(),
-        )?;
-        let mut layer_devices = Vec::new();
-        for layer in 0..self.inner.num_layers(&config)? {
-            let device = mapper.device_for(layer, false).cloned();
-            layer_devices.push(device);
-        }
-        let dtype = mapper.get_min_dtype(dtype)?;
-
-        // TODO: PagedAttention is not supported with CPU for now.
-        // This check is not really necessary because `get_device_layers` should prevent it.
-        let mapping_uses_cpu = mapper.get_unique_devices().iter().any(Device::is_cpu);
-        if mapping_uses_cpu && paged_attn_config.is_some() {
-            warn!("Device mapping contains a mix of GPU and CPU. There is no CPU support for PagedAttention, disabling PagedAttention.");
-            paged_attn_config = None;
-        }
-
-        info!("Model config: {:?}", self.inner.get_config_repr(&config)?);
-        if crate::using_flash_attn() {
-            once_log_info("FlashAttention is enabled.");
-        }
-
-        // Logic for ISQ here: if no calibration (i.e imatrix), then allow immediate ISQ. Otherwise, back to normal.
-        let mut loading_isq = if self.config.imatrix.is_none()
-            && self.config.calibration_file.is_none()
-            && !device.is_cuda()
-            && self.config.write_uqff.is_none()
-            && in_situ_quant.is_some()
-        {
-            let predicates = if matches!(self.config.organization, IsqOrganization::MoeExpertsOnly)
-            {
-                self.inner.immediate_isq_predicates_moqe(&config)?
-            } else {
-                self.inner.immediate_isq_predicates(&config)?
-            };
-            info!("Applying ISQ to {in_situ_quant:?}");
-            if predicates.is_empty() {
-                warn!("No predicates for this model and ISQ setting detected. ISQ will not be applied to any weights!");
-            }
-            mistralrs_quant::set_immediate_isq(in_situ_quant, predicates);
-            false
-        } else {
-            in_situ_quant.is_some()
-        };
-
-        if let Some(ref topology) = self.config.topology {
-            loading_isq |= topology
-                .0
-                .iter()
-                .any(|layer| layer.as_ref().is_some_and(|layer| layer.isq.is_some()));
-        }
-
-        if self.config.imatrix.is_some() && self.config.calibration_file.is_some() {
-            anyhow::bail!(
-                "`imatrix` and `calibration_file` were both specified, this is not allowed."
-            );
-        }
-
-        // Load onto the regular device if not using isq or if the calibration file is specified
-        let load_device = if !loading_isq || self.config.calibration_file.is_some() {
-            loading_isq = false;
-            device.clone()
-        } else {
-            Device::Cpu
-        };
-
-        let is_xlora = self.kind.is_adapted_and(|a| a.is_x_lora());
-
-        let attention_mechanism = if paged_attn_config.is_some() {
-            AttentionImplementation::PagedAttention
-        } else {
-            AttentionImplementation::Eager
-        };
-
-        let multi_progress = Arc::new(MultiProgress::new());
-
-        // Load matformer slicing config if provided
-        let matformer_slicing_config = if let Some(matformer_path) =
-            &self.config.matformer_config_path
-        {
-            use crate::matformer::{MatformerConfig, MatformerSliceConfig};
-            info!("Loading Matformer config from {:?}", matformer_path);
-            let config = Arc::new(MatformerConfig::from_file(matformer_path)?);
-
-            if let Some(slice_name) = &self.config.matformer_slice_name {
-                info!("Using Matformer slice: {}", slice_name);
-                Some(MatformerSliceConfig::new(slice_name.clone(), config))
-            } else {
-                // If no slice name is provided but config exists, we'll need to handle this
-                // For now, return None and let the model handle the default slice selection
-                warn!("Matformer config loaded but no slice name specified. Models will use their default slice.");
-                None
-            }
-        } else {
-            None
-        };
-
-        let mut model = if use_nccl || cfg!(feature = "ring") {
-            let (mapper, sharded_vb) = distributed::prepare_distributed_mapper(
-                dtype,
                 &device,
-                &available_devices,
-                silent,
-                &config,
-                loading_isq,
-                self.config.from_uqff.is_some(),
-                self.config.organization,
-                &*self.inner,
-                paths.as_ref(),
+                self.config.topology.as_ref(),
             )?;
-
-            // Special case for where things can be more optimially loaded.
-            match self.kind {
-                ModelKind::Normal => normal_model_loader_sharded!(
-                    sharded_vb,
-                    config,
-                    self.inner,
-                    mapper,
-                    loading_isq,
-                    device.clone(),
-                    attention_mechanism,
-                    multi_progress.clone(),
-                    matformer_slicing_config.clone(),
-                ),
-                ModelKind::Adapter {
-                    adapter: AdapterKind::XLora,
-                } => xlora_model_loader!(
-                    paths,
-                    Some(dtype),
-                    &load_device,
-                    layer_devices.clone(),
-                    config,
-                    self.inner,
-                    silent,
-                    mapper,
-                    loading_isq,
-                    device.clone(),
-                    multi_progress.clone(),
-                    matformer_slicing_config.clone(),
-                ),
-                ModelKind::Adapter {
-                    adapter: AdapterKind::Lora,
-                } => lora_model_loader!(
-                    paths,
-                    Some(dtype),
-                    &load_device,
-                    layer_devices.clone(),
-                    config,
-                    self.inner,
-                    silent,
-                    mapper,
-                    loading_isq,
-                    self.config.from_uqff.is_some(),
-                    device.clone(),
-                    attention_mechanism,
-                    matches!(self.config.organization, IsqOrganization::MoeExpertsOnly),
-                    multi_progress.clone(),
-                    matformer_slicing_config.clone(),
-                ),
-                _ => unreachable!(),
+            let mapper = mapper.into_mapper(
+                self.inner.num_layers(&config)?,
+                &device,
+                self.config.topology.as_ref(),
+            )?;
+            let mut layer_devices = Vec::new();
+            for layer in 0..self.inner.num_layers(&config)? {
+                let device = mapper.device_for(layer, false).cloned();
+                layer_devices.push(device);
             }
-        } else {
-            match self.kind {
-                ModelKind::Normal => normal_model_loader!(
-                    paths,
-                    Some(dtype),
-                    &load_device,
-                    layer_devices.clone(),
-                    config,
-                    self.inner,
-                    silent,
-                    mapper,
-                    loading_isq,
-                    self.config.from_uqff.is_some(),
-                    device.clone(),
-                    attention_mechanism,
-                    matches!(self.config.organization, IsqOrganization::MoeExpertsOnly),
-                    multi_progress.clone(),
-                    matformer_slicing_config.clone(),
-                ),
-                ModelKind::Adapter {
-                    adapter: AdapterKind::XLora,
-                } => xlora_model_loader!(
-                    paths,
-                    Some(dtype),
-                    &load_device,
-                    layer_devices.clone(),
-                    config,
-                    self.inner,
-                    silent,
-                    mapper,
-                    loading_isq,
-                    device.clone(),
-                    multi_progress.clone(),
-                    matformer_slicing_config.clone(),
-                ),
-                ModelKind::Adapter {
-                    adapter: AdapterKind::Lora,
-                } => lora_model_loader!(
-                    paths,
-                    Some(dtype),
-                    &load_device,
-                    layer_devices.clone(),
-                    config,
-                    self.inner,
-                    silent,
-                    mapper,
-                    loading_isq,
-                    self.config.from_uqff.is_some(),
-                    device.clone(),
-                    attention_mechanism,
-                    matches!(self.config.organization, IsqOrganization::MoeExpertsOnly),
-                    multi_progress.clone(),
-                    matformer_slicing_config.clone(),
-                ),
-                _ => unreachable!(),
-            }
-        };
+            let dtype = mapper.get_min_dtype(dtype)?;
 
-        let tokenizer = get_tokenizer(paths.get_tokenizer_filename(), None)?;
-        let gen_conf: Option<GenerationConfig> = paths.get_gen_conf_filename().and_then(|f| {
-            match serde_json::from_str::<GenerationConfig>(&fs::read_to_string(f).unwrap()) {
-                Ok(conf) => Some(conf),
-                Err(e) => {
-                    warn!("Failed to parse generation_config.json: {}", e);
-                    None
+            // TODO: PagedAttention is not supported with CPU for now.
+            // This check is not really necessary because `get_device_layers` should prevent it.
+            let mapping_uses_cpu = mapper.get_unique_devices().iter().any(Device::is_cpu);
+            if mapping_uses_cpu && paged_attn_config.is_some() {
+                warn!("Device mapping contains a mix of GPU and CPU. There is no CPU support for PagedAttention, disabling PagedAttention.");
+                paged_attn_config = None;
+            }
+
+            info!("Model config: {:?}", self.inner.get_config_repr(&config)?);
+            if crate::using_flash_attn() {
+                once_log_info("FlashAttention is enabled.");
+            }
+
+            // Logic for ISQ here: if no calibration (i.e imatrix), then allow immediate ISQ. Otherwise, back to normal.
+            let mut loading_isq = if self.config.imatrix.is_none()
+                && self.config.calibration_file.is_none()
+                && !device.is_cuda()
+                && self.config.write_uqff.is_none()
+                && in_situ_quant.is_some()
+            {
+                let predicates =
+                    if matches!(self.config.organization, IsqOrganization::MoeExpertsOnly) {
+                        self.inner.immediate_isq_predicates_moqe(&config)?
+                    } else {
+                        self.inner.immediate_isq_predicates(&config)?
+                    };
+                info!("Applying ISQ to {in_situ_quant:?}");
+                if predicates.is_empty() {
+                    warn!("No predicates for this model and ISQ setting detected. ISQ will not be applied to any weights!");
                 }
-            }
-        });
+                mistralrs_quant::set_immediate_isq(in_situ_quant, predicates);
+                false
+            } else {
+                in_situ_quant.is_some()
+            };
 
-        let chat_template_explicit = paths
-            .get_chat_template_explicit()
-            .as_ref()
-            .map(|x| x.to_string_lossy().to_string());
-        let chat_template = get_chat_template(
-            paths,
-            self.jinja_explicit.as_ref(),
-            chat_template_explicit.as_ref(),
-            self.chat_template.as_ref(),
-            None,
-        );
-
-        if let Some(calibration_file) = &self.config.calibration_file {
-            let calibration_data = std::fs::read_to_string(calibration_file)?;
-            // Tokenize, don't add bos yet
-            let tokens = tokenizer
-                .encode_fast(calibration_data, false)
-                .map_err(anyhow::Error::msg)?
-                .get_ids()
-                .to_vec();
-            info!(
-                "Collecting imatrix from calibration file `{}` of {} tokens.",
-                calibration_file.display(),
-                tokens.len()
-            );
-            let bos_toks = chat_template.bos_tok().map(|b| vec![b]).unwrap_or_default();
-            let bos_tok_id = tokenizer
-                .token_to_id(&bos_toks[0])
-                .expect("Somehow the bos token is not present.");
-
-            match self.config.organization {
-                IsqOrganization::Default => model.begin_track_stats()?,
-                IsqOrganization::MoeExpertsOnly => model.begin_track_stats_moe_experts_only()?,
+            if let Some(ref topology) = self.config.topology {
+                loading_isq |= topology
+                    .0
+                    .iter()
+                    .any(|layer| layer.as_ref().is_some_and(|layer| layer.isq.is_some()));
             }
 
-            const CHUNK_SIZE: usize = 1024;
-            let n_chunks = tokens.len().div_ceil(CHUNK_SIZE);
-            let start = Instant::now();
-            for (i, chunk) in tokens.chunks(CHUNK_SIZE).enumerate() {
-                let chunk = [vec![bos_tok_id], chunk.to_vec()].concat();
-                let chunk_len = chunk.len();
-
-                let start = Instant::now();
-                let inputs = make_prompt_chunk(
-                    0,
-                    vec![&chunk],
-                    &[0],
-                    &load_device,
-                    None,
-                    false,
-                    None,
-                    Some(pipeline_mapper.as_ref()),
-                )?;
-
-                model.forward(
-                    &inputs.input.to_device(model.device())?,
-                    &inputs.positions,
-                    inputs.context_lens.clone(),
-                    inputs.position_ids.clone(),
-                    None,
-                    &inputs.flash_meta.clone(),
-                )?;
-
-                match model.cache_mut() {
-                    EitherCache::Full(full) => {
-                        for layer in &mut *full.lock() {
-                            *layer = None
-                        }
-                    }
-                    EitherCache::Normal(normal) => {
-                        for layer in &mut *normal.lock().unwrap().0 {
-                            layer.reset();
-                        }
-                    }
-                }
-
-                let end = Instant::now();
-                info!(
-                    "Processed chunk {}/{n_chunks} ({chunk_len} tokens), {:.2}s",
-                    i + 1,
-                    end.duration_since(start).as_secs_f32()
+            if self.config.imatrix.is_some() && self.config.calibration_file.is_some() {
+                anyhow::bail!(
+                    "`imatrix` and `calibration_file` were both specified, this is not allowed."
                 );
             }
-            load_device.synchronize()?;
-            let end = Instant::now();
-            info!(
-                "Finished collecting imatrix in {:.2}s",
-                end.duration_since(start).as_secs_f32()
-            );
-        }
 
-        // Only if loading from UQFF
-        if (loading_isq || self.config.topology.is_some()) && self.config.from_uqff.is_none() {
-            let imatrix_source = match (
-                self.config.imatrix.as_ref(),
-                self.config.calibration_file.is_some(),
-            ) {
-                (None, false) => None,
-                (Some(file), false) => Some(ImatrixDataSource::File(file)),
-                (None, true) => Some(ImatrixDataSource::Collected),
-                (Some(_), true) => unreachable!(),
+            // Load onto the regular device if not using isq or if the calibration file is specified
+            let load_device = if !loading_isq || self.config.calibration_file.is_some() {
+                loading_isq = false;
+                device.clone()
+            } else {
+                Device::Cpu
             };
 
-            info!("Applying ISQ to all ranks.");
+            let is_xlora = self.kind.is_adapted_and(|a| a.is_x_lora());
+
+            let attention_mechanism = if paged_attn_config.is_some() {
+                AttentionImplementation::PagedAttention
+            } else {
+                AttentionImplementation::Eager
+            };
 
             let multi_progress = Arc::new(MultiProgress::new());
 
-            model.quantize(
-                in_situ_quant,
-                model.device().clone(),
-                self.config.topology.as_ref(),
-                silent,
-                imatrix_source,
-                self.config.organization,
-                self.config.write_uqff.as_ref(),
-                UqffFullSer {
-                    tokenizer: &tokenizer,
-                    template_filename: paths.get_template_filename(),
-                    generation_config: paths.get_gen_conf_filename(),
-                    config: config.clone(),
-                    processor_filename: &None,
-                    preprocessor_filename: &None,
-                },
-                multi_progress.clone(),
-            )?;
-        } else if let Some(from_uqff) = &*self.from_uqff.read().unwrap() {
-            model.load_from_artifacts(
-                device.clone(),
-                self.config.topology.as_ref(),
-                silent,
-                from_uqff,
-            )?;
-        }
+            // Load matformer slicing config if provided
+            let matformer_slicing_config = if let Some(matformer_path) =
+                &self.config.matformer_config_path
+            {
+                use crate::matformer::{MatformerConfig, MatformerSliceConfig};
+                info!("Loading Matformer config from {:?}", matformer_path);
+                let config = Arc::new(MatformerConfig::from_file(matformer_path)?);
 
-        let paged_attn_config = if matches!(
-            self.kind,
-            ModelKind::Adapter {
-                adapter: AdapterKind::XLora
+                if let Some(slice_name) = &self.config.matformer_slice_name {
+                    info!("Using Matformer slice: {}", slice_name);
+                    Some(MatformerSliceConfig::new(slice_name.clone(), config))
+                } else {
+                    // If no slice name is provided but config exists, we'll need to handle this
+                    // For now, return None and let the model handle the default slice selection
+                    warn!("Matformer config loaded but no slice name specified. Models will use their default slice.");
+                    None
+                }
+            } else {
+                None
+            };
+
+            let mut model = if use_nccl || cfg!(feature = "ring") {
+                let (mapper, sharded_vb) = distributed::prepare_distributed_mapper(
+                    dtype,
+                    &device,
+                    &available_devices,
+                    silent,
+                    &config,
+                    loading_isq,
+                    self.config.from_uqff.is_some(),
+                    self.config.organization,
+                    &*self.inner,
+                    paths.as_ref(),
+                )?;
+
+                // Special case for where things can be more optimially loaded.
+                match self.kind {
+                    ModelKind::Normal => normal_model_loader_sharded!(
+                        sharded_vb,
+                        config,
+                        self.inner,
+                        mapper,
+                        loading_isq,
+                        device.clone(),
+                        attention_mechanism,
+                        multi_progress.clone(),
+                        matformer_slicing_config.clone(),
+                    ),
+                    ModelKind::Adapter {
+                        adapter: AdapterKind::XLora,
+                    } => xlora_model_loader!(
+                        paths,
+                        Some(dtype),
+                        &load_device,
+                        layer_devices.clone(),
+                        config,
+                        self.inner,
+                        silent,
+                        mapper,
+                        loading_isq,
+                        device.clone(),
+                        multi_progress.clone(),
+                        matformer_slicing_config.clone(),
+                    ),
+                    ModelKind::Adapter {
+                        adapter: AdapterKind::Lora,
+                    } => lora_model_loader!(
+                        paths,
+                        Some(dtype),
+                        &load_device,
+                        layer_devices.clone(),
+                        config,
+                        self.inner,
+                        silent,
+                        mapper,
+                        loading_isq,
+                        self.config.from_uqff.is_some(),
+                        device.clone(),
+                        attention_mechanism,
+                        matches!(self.config.organization, IsqOrganization::MoeExpertsOnly),
+                        multi_progress.clone(),
+                        matformer_slicing_config.clone(),
+                    ),
+                    _ => unreachable!(),
+                }
+            } else {
+                match self.kind {
+                    ModelKind::Normal => normal_model_loader!(
+                        paths,
+                        Some(dtype),
+                        &load_device,
+                        layer_devices.clone(),
+                        config,
+                        self.inner,
+                        silent,
+                        mapper,
+                        loading_isq,
+                        self.config.from_uqff.is_some(),
+                        device.clone(),
+                        attention_mechanism,
+                        matches!(self.config.organization, IsqOrganization::MoeExpertsOnly),
+                        multi_progress.clone(),
+                        matformer_slicing_config.clone(),
+                    ),
+                    ModelKind::Adapter {
+                        adapter: AdapterKind::XLora,
+                    } => xlora_model_loader!(
+                        paths,
+                        Some(dtype),
+                        &load_device,
+                        layer_devices.clone(),
+                        config,
+                        self.inner,
+                        silent,
+                        mapper,
+                        loading_isq,
+                        device.clone(),
+                        multi_progress.clone(),
+                        matformer_slicing_config.clone(),
+                    ),
+                    ModelKind::Adapter {
+                        adapter: AdapterKind::Lora,
+                    } => lora_model_loader!(
+                        paths,
+                        Some(dtype),
+                        &load_device,
+                        layer_devices.clone(),
+                        config,
+                        self.inner,
+                        silent,
+                        mapper,
+                        loading_isq,
+                        self.config.from_uqff.is_some(),
+                        device.clone(),
+                        attention_mechanism,
+                        matches!(self.config.organization, IsqOrganization::MoeExpertsOnly),
+                        multi_progress.clone(),
+                        matformer_slicing_config.clone(),
+                    ),
+                    _ => unreachable!(),
+                }
+            };
+
+            let tokenizer = get_tokenizer(paths.get_tokenizer_filename(), None)?;
+            let gen_conf: Option<GenerationConfig> = paths.get_gen_conf_filename().and_then(|f| {
+                match serde_json::from_str::<GenerationConfig>(&fs::read_to_string(f).unwrap()) {
+                    Ok(conf) => Some(conf),
+                    Err(e) => {
+                        warn!("Failed to parse generation_config.json: {}", e);
+                        None
+                    }
+                }
+            });
+
+            let chat_template_explicit = paths
+                .get_chat_template_explicit()
+                .as_ref()
+                .map(|x| x.to_string_lossy().to_string());
+            let chat_template = get_chat_template(
+                paths,
+                self.jinja_explicit.as_ref(),
+                chat_template_explicit.as_ref(),
+                self.chat_template.as_ref(),
+                None,
+            );
+
+            if let Some(calibration_file) = &self.config.calibration_file {
+                let calibration_data = std::fs::read_to_string(calibration_file)?;
+                // Tokenize, don't add bos yet
+                let tokens = tokenizer
+                    .encode_fast(calibration_data, false)
+                    .map_err(anyhow::Error::msg)?
+                    .get_ids()
+                    .to_vec();
+                info!(
+                    "Collecting imatrix from calibration file `{}` of {} tokens.",
+                    calibration_file.display(),
+                    tokens.len()
+                );
+                let bos_toks = chat_template.bos_tok().map(|b| vec![b]).unwrap_or_default();
+                let bos_tok_id = tokenizer
+                    .token_to_id(&bos_toks[0])
+                    .expect("Somehow the bos token is not present.");
+
+                match self.config.organization {
+                    IsqOrganization::Default => model.begin_track_stats()?,
+                    IsqOrganization::MoeExpertsOnly => {
+                        model.begin_track_stats_moe_experts_only()?
+                    }
+                }
+
+                const CHUNK_SIZE: usize = 1024;
+                let n_chunks = tokens.len().div_ceil(CHUNK_SIZE);
+                let start = Instant::now();
+                for (i, chunk) in tokens.chunks(CHUNK_SIZE).enumerate() {
+                    let chunk = [vec![bos_tok_id], chunk.to_vec()].concat();
+                    let chunk_len = chunk.len();
+
+                    let start = Instant::now();
+                    let inputs = make_prompt_chunk(
+                        0,
+                        vec![&chunk],
+                        &[0],
+                        &load_device,
+                        None,
+                        false,
+                        None,
+                        Some(pipeline_mapper.as_ref()),
+                    )?;
+
+                    model.forward(
+                        &inputs.input.to_device(model.device())?,
+                        &inputs.positions,
+                        inputs.context_lens.clone(),
+                        inputs.position_ids.clone(),
+                        None,
+                        &inputs.flash_meta.clone(),
+                    )?;
+
+                    match model.cache_mut() {
+                        EitherCache::Full(full) => {
+                            for layer in &mut *full.lock() {
+                                *layer = None
+                            }
+                        }
+                        EitherCache::Normal(normal) => {
+                            for layer in &mut *normal.lock().unwrap().0 {
+                                layer.reset();
+                            }
+                        }
+                    }
+
+                    let end = Instant::now();
+                    info!(
+                        "Processed chunk {}/{n_chunks} ({chunk_len} tokens), {:.2}s",
+                        i + 1,
+                        end.duration_since(start).as_secs_f32()
+                    );
+                }
+                load_device.synchronize()?;
+                let end = Instant::now();
+                info!(
+                    "Finished collecting imatrix in {:.2}s",
+                    end.duration_since(start).as_secs_f32()
+                );
             }
-        ) {
-            warn!(
+
+            // Only if loading from UQFF
+            if (loading_isq || self.config.topology.is_some()) && self.config.from_uqff.is_none() {
+                let imatrix_source = match (
+                    self.config.imatrix.as_ref(),
+                    self.config.calibration_file.is_some(),
+                ) {
+                    (None, false) => None,
+                    (Some(file), false) => Some(ImatrixDataSource::File(file)),
+                    (None, true) => Some(ImatrixDataSource::Collected),
+                    (Some(_), true) => unreachable!(),
+                };
+
+                info!("Applying ISQ to all ranks.");
+
+                let multi_progress = Arc::new(MultiProgress::new());
+
+                model.quantize(
+                    in_situ_quant,
+                    model.device().clone(),
+                    self.config.topology.as_ref(),
+                    silent,
+                    imatrix_source,
+                    self.config.organization,
+                    self.config.write_uqff.as_ref(),
+                    UqffFullSer {
+                        tokenizer: &tokenizer,
+                        template_filename: paths.get_template_filename(),
+                        generation_config: paths.get_gen_conf_filename(),
+                        config: config.clone(),
+                        processor_filename: &None,
+                        preprocessor_filename: &None,
+                    },
+                    multi_progress.clone(),
+                )?;
+            } else if let Some(from_uqff) = &*self.from_uqff.read().unwrap() {
+                model.load_from_artifacts(
+                    device.clone(),
+                    self.config.topology.as_ref(),
+                    silent,
+                    from_uqff,
+                )?;
+            }
+
+            let paged_attn_config = if matches!(
+                self.kind,
+                ModelKind::Adapter {
+                    adapter: AdapterKind::XLora
+                }
+            ) {
+                warn!(
                 "Adapter parallel_models do not currently support PagedAttention, running without"
             );
-            None
-        } else {
-            paged_attn_config
-        };
+                None
+            } else {
+                paged_attn_config
+            };
 
-        let (cache_config, cache_engine) = if let Some(paged_attn_config) = paged_attn_config {
-            let cache_config = calculate_cache_config(
-                paged_attn_config.mem_gpu,
-                paged_attn_config.mem_cpu,
-                paged_attn_config.block_size,
-                dtype,
-                paged_attn_config.cache_type,
-                model.config(),
-                &device,
-                &pipeline_mapper
-                    .get_unique_devices()
-                    .into_iter()
-                    .map(Some)
-                    .collect::<Vec<_>>(),
-                silent,
-            )?;
+            let (cache_config, cache_engine) = if let Some(paged_attn_config) = paged_attn_config {
+                let cache_config = calculate_cache_config(
+                    paged_attn_config.mem_gpu,
+                    paged_attn_config.mem_cpu,
+                    paged_attn_config.block_size,
+                    dtype,
+                    paged_attn_config.cache_type,
+                    model.config(),
+                    &device,
+                    &pipeline_mapper
+                        .get_unique_devices()
+                        .into_iter()
+                        .map(Some)
+                        .collect::<Vec<_>>(),
+                    silent,
+                )?;
 
-            let mut layer_devices = Vec::new();
-            for layer in 0..self.inner.num_layers(&config)? {
-                let device = model.get_layers().1.device_for(layer, false).cloned();
-                layer_devices.push(device);
-            }
-            let cache_engine = CacheEngine::new(
-                model.config(),
-                &cache_config,
-                dtype,
-                model.device(),
-                layer_devices.clone(),
-            )?;
-
-            (Some(cache_config), Some(cache_engine))
-        } else {
-            (None, None)
-        };
-
-        let max_seq_len = model.max_seq_len();
-        let llg_factory = build_llg_factory(tokenizer.clone())?;
-        let num_hidden_layers = match model.cache() {
-            EitherCache::Full(full) => full.lock().len(),
-            EitherCache::Normal(normal) => normal.lock().unwrap().0.len(),
-        };
-        let eos = calculate_eos_tokens(&chat_template, gen_conf, &tokenizer);
-        let sliding_window = model.config().sliding_window;
-        let model_metadata = Arc::new(model.config().clone());
-
-        Ok(Arc::new(Mutex::new(NormalPipeline {
-            model,
-            tokenizer: tokenizer.into(),
-            no_kv_cache: self.no_kv_cache,
-            chat_template: Arc::new(chat_template),
-            non_granular_state: self.tgt_non_granular_index.map(|tgt_non_granular_index| {
-                NonGranularState {
-                    non_granular_index: Arc::new(Mutex::new(0)),
-                    tgt_non_granular_index,
+                let mut layer_devices = Vec::new();
+                for layer in 0..self.inner.num_layers(&config)? {
+                    let device = model.get_layers().1.device_for(layer, false).cloned();
+                    layer_devices.push(device);
                 }
-            }),
-            model_id: self.model_id.clone(),
-            metadata: Arc::new(GeneralMetadata {
-                max_seq_len,
-                llg_factory: Some(llg_factory),
+                let cache_engine = CacheEngine::new(
+                    model.config(),
+                    &cache_config,
+                    dtype,
+                    model.device(),
+                    layer_devices.clone(),
+                )?;
+
+                (Some(cache_config), Some(cache_engine))
+            } else {
+                (None, None)
+            };
+
+            let max_seq_len = model.max_seq_len();
+            let llg_factory = build_llg_factory(tokenizer.clone())?;
+            let num_hidden_layers = match model.cache() {
+                EitherCache::Full(full) => full.lock().len(),
+                EitherCache::Normal(normal) => normal.lock().unwrap().0.len(),
+            };
+            let eos = calculate_eos_tokens(&chat_template, gen_conf, &tokenizer);
+            let sliding_window = model.config().sliding_window;
+            let model_metadata = Arc::new(model.config().clone());
+
+            Ok(Arc::new(Mutex::new(NormalPipeline {
+                model,
+                tokenizer: tokenizer.into(),
                 no_kv_cache: self.no_kv_cache,
-                no_prefix_cache: is_xlora,
-                num_hidden_layers,
-                eos_tok: eos,
-                kind: self.kind.clone(),
-                is_xlora,
-                activation_dtype: dtype,
-                sliding_window,
-                cache_config,
-                cache_engine,
-                prompt_chunksize: Some(NonZero::new(prompt_chunksize).unwrap()),
-                model_metadata: Some(model_metadata),
-                modalities: Modalities {
-                    input: vec![SupportedModality::Text],
-                    output: vec![SupportedModality::Text],
-                },
-            }),
-            topology: self.config.topology.clone(),
-            silent,
-            organization: self.config.organization,
-            template_filename: paths.get_template_filename().clone(),
-            generation_config: paths.get_gen_conf_filename().cloned(),
-            config,
-            imatrix: self.config.imatrix.clone(),
-            mapper: pipeline_mapper,
-        })))
+                chat_template: Arc::new(chat_template),
+                non_granular_state: self.tgt_non_granular_index.map(|tgt_non_granular_index| {
+                    NonGranularState {
+                        non_granular_index: Arc::new(Mutex::new(0)),
+                        tgt_non_granular_index,
+                    }
+                }),
+                model_id: self.model_id.clone(),
+                metadata: Arc::new(GeneralMetadata {
+                    max_seq_len,
+                    llg_factory: Some(llg_factory),
+                    no_kv_cache: self.no_kv_cache,
+                    no_prefix_cache: is_xlora,
+                    num_hidden_layers,
+                    eos_tok: eos,
+                    kind: self.kind.clone(),
+                    is_xlora,
+                    activation_dtype: dtype,
+                    sliding_window,
+                    cache_config,
+                    cache_engine,
+                    prompt_chunksize: Some(NonZero::new(prompt_chunksize).unwrap()),
+                    model_metadata: Some(model_metadata),
+                    modalities: Modalities {
+                        input: vec![SupportedModality::Text],
+                        output: vec![SupportedModality::Text],
+                    },
+                }),
+                topology: self.config.topology.clone(),
+                silent,
+                organization: self.config.organization,
+                template_filename: paths.get_template_filename().clone(),
+                generation_config: paths.get_gen_conf_filename().cloned(),
+                config,
+                imatrix: self.config.imatrix.clone(),
+                mapper: pipeline_mapper,
+            })))
+        })
     }
 
     fn get_id(&self) -> String {
