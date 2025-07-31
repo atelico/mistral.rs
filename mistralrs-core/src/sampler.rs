@@ -5,7 +5,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use candle_core::{DType, Device, Error, Result, Tensor, D};
+use candle_core::{autorelease_block, DType, Device, Error, Result, Tensor, D};
 use mistralrs_quant::{CumSumOp, SortOp};
 #[cfg(feature = "pyo3_macros")]
 use pyo3::pyclass;
@@ -814,65 +814,66 @@ impl Sampler {
         sample_speculative: bool,
         multiple_sequences: bool,
     ) -> Result<Logprobs> {
-        // if cfg!(feature = "metal") && !multiple_sequences {
-        //     return self.sample_fast(
-        //         logits,
-        //         context,
-        //         return_logprobs,
-        //         self.top_k,
-        //         self.top_p,
-        //         self.min_p,
-        //     );
-        // }
-
-        let logits = logits.to_vec1()?;
-        let mut logits = self.apply_penalties(logits, context)?;
-        for processor in &self.logits_processors {
-            logits = processor.apply(&logits, context)?;
-        }
-        let next_token = if sample_speculative {
-            match self.temperature {
-                None => self.sample_speculative_top_kp_min_p(
-                    logits,
-                    return_logprobs,
-                    self.top_k,
-                    self.top_p as f32,
-                    self.min_p as f32,
-                )?,
-                Some(temperature) => {
-                    let logits = (&logits / temperature)?;
-                    let probs = candle_nn::ops::softmax_last_dim(&logits)?;
-
-                    self.sample_speculative_top_kp_min_p(
-                        probs,
+        autorelease_block!({
+            // if cfg!(feature = "metal") && !multiple_sequences {
+            //     return self.sample_fast(
+            //         logits,
+            //         context,
+            //         return_logprobs,
+            //         self.top_k,
+            //         self.top_p,
+            //         self.min_p,
+            //     );
+            // }
+            let logits = logits.to_vec1()?;
+            let mut logits = self.apply_penalties(logits, context)?;
+            for processor in &self.logits_processors {
+                logits = processor.apply(&logits, context)?;
+            }
+            let next_token = if sample_speculative {
+                match self.temperature {
+                    None => self.sample_speculative_top_kp_min_p(
+                        logits,
                         return_logprobs,
                         self.top_k,
                         self.top_p as f32,
                         self.min_p as f32,
-                    )?
-                }
-            }
-        } else {
-            match self.temperature {
-                None => self.sample_argmax(logits, return_logprobs)?,
-                Some(temperature) => {
-                    let logits = (&logits / temperature)?;
-                    let logits = candle_nn::ops::softmax_last_dim(&logits)?;
-                    let mut probs: Vec<f32> = logits.to_vec1()?;
+                    )?,
+                    Some(temperature) => {
+                        let logits = (&logits / temperature)?;
+                        let probs = candle_nn::ops::softmax_last_dim(&logits)?;
 
-                    self.sample_top_kp_min_p(
-                        &mut probs,
-                        &logits,
-                        self.top_k,
-                        self.top_p as f32,
-                        self.min_p as f32,
-                        return_logprobs,
-                        rng,
-                    )?
+                        self.sample_speculative_top_kp_min_p(
+                            probs,
+                            return_logprobs,
+                            self.top_k,
+                            self.top_p as f32,
+                            self.min_p as f32,
+                        )?
+                    }
                 }
-            }
-        };
-        Ok(next_token)
+            } else {
+                match self.temperature {
+                    None => self.sample_argmax(logits, return_logprobs)?,
+                    Some(temperature) => {
+                        let logits = (&logits / temperature)?;
+                        let logits = candle_nn::ops::softmax_last_dim(&logits)?;
+                        let mut probs: Vec<f32> = logits.to_vec1()?;
+
+                        self.sample_top_kp_min_p(
+                            &mut probs,
+                            &logits,
+                            self.top_k,
+                            self.top_p as f32,
+                            self.min_p as f32,
+                            return_logprobs,
+                            rng,
+                        )?
+                    }
+                }
+            };
+            Ok(next_token)
+        })
     }
 }
 
