@@ -428,59 +428,61 @@ pub trait Pipeline:
 
                 let mut exec_duration = Duration::ZERO;
                 for (i, inputs) in inputs_iter.into_iter().enumerate() {
-                    let InputProcessorOutput {
-                        inputs,
-                        seq_indices,
-                    } = inputs.map_err(candle_core::Error::msg)?;
-                    if i == 0 {
-                        match pre_op {
-                            CacheInstruction::In => self.clone_in_cache(input_seqs),
-                            CacheInstruction::Nothing => (),
-                            CacheInstruction::Reset {
-                                load_preallocated_cache,
-                                reset_non_granular,
-                            } => self.set_none_cache(
-                                input_seqs,
-                                reset_non_granular,
-                                false,
-                                load_preallocated_cache,
-                            ),
-                            _ => unreachable!("Unreachable PRE cache op."),
+                    autorelease_block!({
+                        let InputProcessorOutput {
+                            inputs,
+                            seq_indices,
+                        } = inputs.map_err(candle_core::Error::msg)?;
+                        if i == 0 {
+                            match pre_op {
+                                CacheInstruction::In => self.clone_in_cache(input_seqs),
+                                CacheInstruction::Nothing => (),
+                                CacheInstruction::Reset {
+                                    load_preallocated_cache,
+                                    reset_non_granular,
+                                } => self.set_none_cache(
+                                    input_seqs,
+                                    reset_non_granular,
+                                    false,
+                                    load_preallocated_cache,
+                                ),
+                                _ => unreachable!("Unreachable PRE cache op."),
+                            }
                         }
-                    }
 
-                    let start = Instant::now();
+                        let start = Instant::now();
 
-                    let raw_logits =
-                        autorelease_block!({ self.forward_inputs(inputs, return_raw_logits) })?;
+                        let raw_logits = self.forward_inputs(inputs, return_raw_logits)?;
 
-                    let end = Instant::now();
-                    exec_duration += end.duration_since(start);
+                        let end = Instant::now();
+                        exec_duration += end.duration_since(start);
 
-                    for (logit_idx, seq_idx) in seq_indices.into_iter().enumerate() {
-                        if let ForwardInputsResult::RawLogits { logits } = &raw_logits {
-                            raw_out_logits[seq_idx][i] =
-                                Some(logits.i(logit_idx)?.to_device(&Device::Cpu)?);
-                        } else {
-                            logits[seq_idx] = Some(raw_logits.index_bs(logit_idx)?);
+                        for (logit_idx, seq_idx) in seq_indices.into_iter().enumerate() {
+                            if let ForwardInputsResult::RawLogits { logits } = &raw_logits {
+                                raw_out_logits[seq_idx][i] =
+                                    Some(logits.i(logit_idx)?.to_device(&Device::Cpu)?);
+                            } else {
+                                logits[seq_idx] = Some(raw_logits.index_bs(logit_idx)?);
+                            }
                         }
+                    })
+                }
+                autorelease_block!({
+                    match post_op {
+                        CacheInstruction::Out => self.clone_out_cache(input_seqs),
+                        CacheInstruction::Nothing => (),
+                        CacheInstruction::Reset {
+                            load_preallocated_cache,
+                            reset_non_granular,
+                        } => self.set_none_cache(
+                            input_seqs,
+                            reset_non_granular,
+                            false,
+                            load_preallocated_cache,
+                        ),
+                        _ => unreachable!("Unreachable POST cache op."),
                     }
-                }
-
-                match post_op {
-                    CacheInstruction::Out => self.clone_out_cache(input_seqs),
-                    CacheInstruction::Nothing => (),
-                    CacheInstruction::Reset {
-                        load_preallocated_cache,
-                        reset_non_granular,
-                    } => self.set_none_cache(
-                        input_seqs,
-                        reset_non_granular,
-                        false,
-                        load_preallocated_cache,
-                    ),
-                    _ => unreachable!("Unreachable POST cache op."),
-                }
+                });
 
                 if raw_out_logits[0][0].is_some() {
                     let start = Instant::now();
@@ -655,27 +657,28 @@ pub trait Pipeline:
 
                 let mut exec_duration = Duration::ZERO;
                 for (i, inputs) in inputs_iter.into_iter().enumerate() {
-                    let InputProcessorOutput {
-                        inputs,
-                        seq_indices,
-                    } = inputs.map_err(candle_core::Error::msg)?;
+                    autorelease_block!({
+                        let InputProcessorOutput {
+                            inputs,
+                            seq_indices,
+                        } = inputs.map_err(candle_core::Error::msg)?;
 
-                    let start = Instant::now();
+                        let start = Instant::now();
 
-                    let raw_logits =
-                        autorelease_block!({ self.forward_inputs(inputs, return_raw_logits) })?;
+                        let raw_logits = self.forward_inputs(inputs, return_raw_logits)?;
 
-                    let end = Instant::now();
-                    exec_duration += end.duration_since(start);
+                        let end = Instant::now();
+                        exec_duration += end.duration_since(start);
 
-                    for (logit_idx, seq_idx) in seq_indices.into_iter().enumerate() {
-                        if let ForwardInputsResult::RawLogits { logits } = &raw_logits {
-                            raw_out_logits[seq_idx][i] =
-                                Some(logits.i(logit_idx)?.to_device(&Device::Cpu)?);
-                        } else {
-                            logits[seq_idx] = Some(raw_logits.index_bs(logit_idx)?);
+                        for (logit_idx, seq_idx) in seq_indices.into_iter().enumerate() {
+                            if let ForwardInputsResult::RawLogits { logits } = &raw_logits {
+                                raw_out_logits[seq_idx][i] =
+                                    Some(logits.i(logit_idx)?.to_device(&Device::Cpu)?);
+                            } else {
+                                logits[seq_idx] = Some(raw_logits.index_bs(logit_idx)?);
+                            }
                         }
-                    }
+                    });
                 }
 
                 if raw_out_logits[0][0].is_some() {
