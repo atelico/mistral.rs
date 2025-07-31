@@ -1,6 +1,6 @@
 use candle_core::{
-    autorelease_block, backend::BackendStorage, CpuStorage, DType, Layout, MetalStorage, Result,
-    Shape, Storage, Tensor,
+    backend::BackendStorage, CpuStorage, DType, Layout, MetalStorage, Result, Shape, Storage,
+    Tensor,
 };
 
 use crate::metal::kernels::{self, PagedAttentionDType};
@@ -327,20 +327,18 @@ pub fn paged_attention(
     softmax_scale: f32,
     softcapping: f32,
 ) -> Result<Tensor> {
-    autorelease_block!({
-        let op = PagedAttention {
-            softmax_scale,
-            key_cache: key_cache.clone(),
-            value_cache: value_cache.clone(),
-            block_tables: block_tables.clone(),
-            context_lens: context_lens.clone(),
-            max_context_len,
-            softcapping,
-            alibi_slopes: alibi_slopes.cloned(),
-            k_v_scale: k_v_scale.cloned(),
-        };
-        q.apply_op1(op)
-    })
+    let op = PagedAttention {
+        softmax_scale,
+        key_cache: key_cache.clone(),
+        value_cache: value_cache.clone(),
+        block_tables: block_tables.clone(),
+        context_lens: context_lens.clone(),
+        max_context_len,
+        softcapping,
+        alibi_slopes: alibi_slopes.cloned(),
+        k_v_scale: k_v_scale.cloned(),
+    };
+    q.apply_op1(op)
 }
 
 /// Insert key and values at the provided slot mapping inside the key value paged cache

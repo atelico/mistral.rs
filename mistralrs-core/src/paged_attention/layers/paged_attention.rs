@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use candle_core::{DType, Device, Result, Tensor};
+use candle_core::{autorelease_block, DType, Device, Result, Tensor};
 
 use mistralrs_paged_attn::{paged_attention, reshape_and_cache};
 
@@ -259,18 +259,20 @@ impl PagedAttention {
         //
         //  alibi_slopes: shape = [num_heads]
         #[allow(clippy::cast_possible_truncation)]
-        let res = paged_attention(
-            &query,
-            k_v_scale.as_ref(),
-            key_cache.as_ref().unwrap(),
-            value_cache.as_ref().unwrap(),
-            block_tables,
-            context_lens,
-            alibi_slopes.as_ref(),
-            input_metadata.max_context_len.unwrap(),
-            sdpa_params.softmax_scale,
-            sdpa_params.softcap.unwrap_or(1.0f32),
-        )?;
+        let res = autorelease_block!({
+            paged_attention(
+                &query,
+                k_v_scale.as_ref(),
+                key_cache.as_ref().unwrap(),
+                value_cache.as_ref().unwrap(),
+                block_tables,
+                context_lens,
+                alibi_slopes.as_ref(),
+                input_metadata.max_context_len.unwrap(),
+                sdpa_params.softmax_scale,
+                sdpa_params.softcap.unwrap_or(1.0f32),
+            )
+        })?;
 
         Ok(res)
     }
