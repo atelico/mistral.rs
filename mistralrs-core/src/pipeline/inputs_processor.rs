@@ -3,7 +3,7 @@
 use std::{any::Any, num::NonZeroUsize, sync::Arc};
 
 use anyhow::Result;
-use candle_core::Device;
+use candle_core::{autorelease_block, autoreleasepool, Device};
 use text_models_inputs_processor::PagedAttentionMeta;
 use tokenizers::Tokenizer;
 
@@ -54,7 +54,9 @@ pub mod text_models_inputs_processor {
     use std::{any::Any, collections::HashMap, fmt::Debug, num::NonZeroUsize, sync::Arc};
 
     use anyhow::Result;
-    use candle_core::{DType, Device, DeviceLocation, Tensor, WithDType};
+    use candle_core::{
+        autorelease_block, autoreleasepool, DType, Device, DeviceLocation, Tensor, WithDType,
+    };
     use tokenizers::Tokenizer;
 
     use crate::{
@@ -165,6 +167,7 @@ pub mod text_models_inputs_processor {
         let mut seqlens_q = if flash_attn { vec![0] } else { Vec::new() };
         let mut seqlens_k = if flash_attn { vec![0] } else { Vec::new() };
         for (seq_id, ctxt) in seq_ids.iter().zip(toks) {
+            let _pool = autoreleasepool();
             let prompt_len = ctxt.len();
             let offset = last_n_context_len.unwrap_or_default();
             seqlen_offsets.push(offset.1 + chunk_offset_toks);
@@ -274,65 +277,71 @@ pub mod text_models_inputs_processor {
 
         let input = Tensor::cat(&seqs_tensors, 0).unwrap();
 
-        let paged_attn_meta = if paged_attn_metadata.is_some() {
-            let max_slot_mapping_len = slot_mappings.iter().map(|x| x.len()).max().unwrap();
-            let slot_mappings =
-                _make_tensor_with_pad(slot_mappings, max_slot_mapping_len, _PAD_SLOT_ID, device)?;
+        let paged_attn_meta = autorelease_block!({
+            if paged_attn_metadata.is_some() {
+                let max_slot_mapping_len = slot_mappings.iter().map(|x| x.len()).max().unwrap();
+                let slot_mappings = _make_tensor_with_pad(
+                    slot_mappings,
+                    max_slot_mapping_len,
+                    _PAD_SLOT_ID,
+                    device,
+                )?;
 
-            let max_block_table_len = block_tables.iter().map(|x| x.len()).max().unwrap();
-            let block_tables = _make_tensor_with_pad(
-                block_tables
+                let max_block_table_len = block_tables.iter().map(|x| x.len()).max().unwrap();
+                let block_tables = _make_tensor_with_pad(
+                    block_tables
+                        .iter()
+                        .map(|x| x.iter().map(|x| *x as u32).collect::<Vec<_>>())
+                        .collect::<Vec<_>>(),
+                    max_block_table_len,
+                    0,
+                    device,
+                )?;
+                let block_tables = block_tables.reshape(((), max_block_table_len))?;
+
+                let max_context_len = paged_attn_context_lens
                     .iter()
-                    .map(|x| x.iter().map(|x| *x as u32).collect::<Vec<_>>())
-                    .collect::<Vec<_>>(),
-                max_block_table_len,
-                0,
-                device,
-            )?;
-            let block_tables = block_tables.reshape(((), max_block_table_len))?;
+                    .map(|x| x.len())
+                    .max()
+                    .unwrap();
 
-            let max_context_len = paged_attn_context_lens
-                .iter()
-                .map(|x| x.len())
-                .max()
-                .unwrap();
+                let context_lens = _make_tensor_with_pad(
+                    paged_attn_context_lens
+                        .iter()
+                        .map(|x| x.iter().map(|x| *x as u32).collect::<Vec<_>>())
+                        .collect::<Vec<_>>(),
+                    max_context_len,
+                    0,
+                    device,
+                )?
+                .reshape(((),))?;
 
-            let context_lens = _make_tensor_with_pad(
-                paged_attn_context_lens
-                    .iter()
-                    .map(|x| x.iter().map(|x| *x as u32).collect::<Vec<_>>())
-                    .collect::<Vec<_>>(),
-                max_context_len,
-                0,
-                device,
-            )?
-            .reshape(((),))?;
+                // For device mapping, make a copy of each tensor for each device
+                let devices = mapper.unwrap().get_unique_devices();
+                let mut slot_mappings_map = HashMap::new();
+                let mut block_tables_map = HashMap::new();
+                let mut context_lens_map = HashMap::new();
 
-            // For device mapping, make a copy of each tensor for each device
-            let devices = mapper.unwrap().get_unique_devices();
-            let mut slot_mappings_map = HashMap::new();
-            let mut block_tables_map = HashMap::new();
-            let mut context_lens_map = HashMap::new();
+                for device in devices {
+                    slot_mappings_map
+                        .insert(device.location(), slot_mappings.clone().to_device(&device)?);
+                    block_tables_map
+                        .insert(device.location(), block_tables.clone().to_device(&device)?);
+                    context_lens_map
+                        .insert(device.location(), context_lens.clone().to_device(&device)?);
+                }
 
-            for device in devices {
-                slot_mappings_map
-                    .insert(device.location(), slot_mappings.clone().to_device(&device)?);
-                block_tables_map
-                    .insert(device.location(), block_tables.clone().to_device(&device)?);
-                context_lens_map
-                    .insert(device.location(), context_lens.clone().to_device(&device)?);
+                Some(PagedAttentionInputMetadata {
+                    slot_mappings: slot_mappings_map,
+                    block_tables: Some(block_tables_map),
+                    context_lens: Some(context_lens_map),
+                    max_context_len: Some(max_context_len),
+                    is_first_prompt_chunk: chunk_offset_toks == 0,
+                })
+            } else {
+                None
             }
-
-            Some(PagedAttentionInputMetadata {
-                slot_mappings: slot_mappings_map,
-                block_tables: Some(block_tables_map),
-                context_lens: Some(context_lens_map),
-                max_context_len: Some(max_context_len),
-                is_first_prompt_chunk: chunk_offset_toks == 0,
-            })
-        } else {
-            None
-        };
+        });
 
         Ok(InputMetadata {
             input,

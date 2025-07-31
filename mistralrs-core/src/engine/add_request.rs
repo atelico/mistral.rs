@@ -516,20 +516,22 @@ impl Engine {
             // Run the inputs processor to update the prompt for multimodal models.
             if images.is_some() || audios.is_some() {
                 let pipeline = get_mut_arcmutex!(self.pipeline);
-                let _ = pipeline.get_processor().inputs_processor().process_inputs(
-                    pipeline.tokenizer(),
-                    &mut [&mut seq],
-                    true,
-                    pipeline.get_metadata().is_xlora,
-                    &pipeline.device(),
-                    pipeline.get_metadata().no_kv_cache,
-                    None,
-                    false,
-                    pipeline.get_input_processor_config(),
-                    None,
-                    pipeline.get_metadata().prompt_chunksize,
-                    pipeline.device_mapper(),
-                );
+                let _ = autorelease_block!({
+                    pipeline.get_processor().inputs_processor().process_inputs(
+                        pipeline.tokenizer(),
+                        &mut [&mut seq],
+                        true,
+                        pipeline.get_metadata().is_xlora,
+                        &pipeline.device(),
+                        pipeline.get_metadata().no_kv_cache,
+                        None,
+                        false,
+                        pipeline.get_input_processor_config(),
+                        None,
+                        pipeline.get_metadata().prompt_chunksize,
+                        pipeline.device_mapper(),
+                    )
+                });
             }
 
             let prefill_cache = handle_seq_error!(
