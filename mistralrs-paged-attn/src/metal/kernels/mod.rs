@@ -821,7 +821,11 @@ pub fn call_paged_attention_v2(
 
         let max_num_partitions =
             (max_context_len + PARTITION_SIZE as i32 - 1) / PARTITION_SIZE as i32;
-        let reduce_shared_mem_size = 2 * max_num_partitions * std::mem::size_of::<f32>() as i32;
+        let mut reduce_shared_mem_size = 2 * max_num_partitions * std::mem::size_of::<f32>() as i32;
+        // The total size of threadgroup memory must be a multiple of 16 bytes.
+        if reduce_shared_mem_size % 16 != 0 {
+            reduce_shared_mem_size = (reduce_shared_mem_size / 16 + 1) * 16;
+        }
         encoder.set_threadgroup_memory_length(0, reduce_shared_mem_size as u64);
 
         encoder.set_buffer(0, Some(output), 0 as NSUInteger);
