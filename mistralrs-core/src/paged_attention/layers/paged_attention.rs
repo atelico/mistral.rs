@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use candle_core::{autorelease_block, DType, Device, Result, Tensor};
+use candle_core::{autorelease_block_for_device, DType, Device, Result, Tensor};
 
 use mistralrs_paged_attn::{paged_attention, reshape_and_cache};
 
@@ -259,7 +259,7 @@ impl PagedAttention {
         //
         //  alibi_slopes: shape = [num_heads]
         #[allow(clippy::cast_possible_truncation)]
-        let res = autorelease_block!({
+        let res = autorelease_block_for_device!(&query.device(), {
             paged_attention(
                 &query,
                 k_v_scale.as_ref(),

@@ -6,7 +6,7 @@ use crate::{
     tools::{ToolCallingMatcher, ToolChoice},
     ModelCategory, RequestMessage, Response,
 };
-use candle_core::{autorelease_block, Tensor};
+use candle_core::{autorelease_block_for_device, Tensor};
 use either::Either;
 use std::{
     ops::Deref,
@@ -415,7 +415,7 @@ impl Engine {
             let seq_preallocated_cache_result: Result<
                 Option<(Tensor, Tensor)>,
                 candle_core::Error,
-            > = autorelease_block!({
+            > = autorelease_block_for_device!(&get_mut_arcmutex!(self.pipeline).device(), {
                 if get_mut_arcmutex!(self.pipeline).do_preallocated_cache() {
                     let metadata = get_mut_arcmutex!(self.pipeline).get_metadata();
                     let model_metadata = metadata
@@ -516,26 +516,27 @@ impl Engine {
             // Run the inputs processor to update the prompt for multimodal models.
             if images.is_some() || audios.is_some() {
                 let pipeline = get_mut_arcmutex!(self.pipeline);
-                let _ = autorelease_block!({
-                    pipeline.get_processor().inputs_processor().process_inputs(
-                        pipeline.tokenizer(),
-                        &mut [&mut seq],
-                        true,
-                        pipeline.get_metadata().is_xlora,
-                        &pipeline.device(),
-                        pipeline.get_metadata().no_kv_cache,
-                        None,
-                        false,
-                        pipeline.get_input_processor_config(),
-                        None,
-                        pipeline.get_metadata().prompt_chunksize,
-                        pipeline.device_mapper(),
-                    )
-                });
+                let _ =
+                    autorelease_block_for_device!(&get_mut_arcmutex!(self.pipeline).device(), {
+                        pipeline.get_processor().inputs_processor().process_inputs(
+                            pipeline.tokenizer(),
+                            &mut [&mut seq],
+                            true,
+                            pipeline.get_metadata().is_xlora,
+                            &pipeline.device(),
+                            pipeline.get_metadata().no_kv_cache,
+                            None,
+                            false,
+                            pipeline.get_input_processor_config(),
+                            None,
+                            pipeline.get_metadata().prompt_chunksize,
+                            pipeline.device_mapper(),
+                        )
+                    });
             }
 
             let prefill_cache = handle_seq_error!(
-                autorelease_block!({
+                autorelease_block_for_device!(&get_mut_arcmutex!(self.pipeline).device(), {
                     get_mut_arcmutex!(self.prefix_cacher).search_for_matching_cache(
                         seq.get_toks(),
                         seq.image_hashes(),
@@ -545,7 +546,7 @@ impl Engine {
                 request.response
             );
 
-            seq = autorelease_block!({
+            seq = autorelease_block_for_device!(&get_mut_arcmutex!(self.pipeline).device(), {
                 match prefill_cache.clone() {
                     Some(MatchingCache::Normal {
                         normal,

@@ -5,7 +5,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use candle_core::{autorelease_block, DType, Device, Error, Result, Tensor, D};
+use candle_core::{autorelease_block_for_device, DType, Device, Error, Result, Tensor, D};
 use mistralrs_quant::{CumSumOp, SortOp};
 #[cfg(feature = "pyo3_macros")]
 use pyo3::pyclass;
@@ -814,7 +814,7 @@ impl Sampler {
         sample_speculative: bool,
         multiple_sequences: bool,
     ) -> Result<Logprobs> {
-        autorelease_block!({
+        autorelease_block_for_device!(logits.device(), {
             // if cfg!(feature = "metal") && !multiple_sequences {
             //     return self.sample_fast(
             //         logits,

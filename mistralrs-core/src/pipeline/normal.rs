@@ -41,7 +41,7 @@ use crate::{
     PagedAttentionConfig, Pipeline, Topology, TryIntoDType, GLOBAL_HF_CACHE,
 };
 use anyhow::Result;
-use candle_core::{autorelease_block, Device, Tensor, Var};
+use candle_core::{autorelease_block_for_device, Device, Tensor, Var};
 use hf_hub::Cache;
 use hf_hub::{api::sync::ApiBuilder, Repo, RepoType};
 use indicatif::MultiProgress;
@@ -310,7 +310,7 @@ impl Loader for NormalLoader {
         mut in_situ_quant: Option<IsqType>,
         mut paged_attn_config: Option<PagedAttentionConfig>,
     ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
-        autorelease_block!({
+        autorelease_block_for_device!(device, {
             let config = std::fs::read_to_string(paths.get_config_filename())?;
 
             if !self.inner.supports_paged_attention(&config)? {

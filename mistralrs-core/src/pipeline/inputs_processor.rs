@@ -3,7 +3,7 @@
 use std::{any::Any, num::NonZeroUsize, sync::Arc};
 
 use anyhow::Result;
-use candle_core::{autorelease_block, autoreleasepool, Device};
+use candle_core::Device;
 use text_models_inputs_processor::PagedAttentionMeta;
 use tokenizers::Tokenizer;
 
@@ -55,7 +55,8 @@ pub mod text_models_inputs_processor {
 
     use anyhow::Result;
     use candle_core::{
-        autorelease_block, autoreleasepool, DType, Device, DeviceLocation, Tensor, WithDType,
+        autorelease_block_for_device, autoreleasepool, DType, Device, DeviceLocation, Tensor,
+        WithDType,
     };
     use tokenizers::Tokenizer;
 
@@ -277,7 +278,7 @@ pub mod text_models_inputs_processor {
 
         let input = Tensor::cat(&seqs_tensors, 0).unwrap();
 
-        let paged_attn_meta = autorelease_block!({
+        let paged_attn_meta = autorelease_block_for_device!(device, {
             if paged_attn_metadata.is_some() {
                 let max_slot_mapping_len = slot_mappings.iter().map(|x| x.len()).max().unwrap();
                 let slot_mappings = _make_tensor_with_pad(

@@ -571,7 +571,7 @@ checksum = "ade8366b8bd5ba243f0a58f036cc0ca8a2f069cff1a2351ef1cac6b083e16fc0"
 [[package]]
 name = "candle-core"
 version = "0.9.1"
-source = "git+https://github.com/atelico/candle.git?rev=947d3080218bdb6220c03b81fb48ee44daedc887#947d3080218bdb6220c03b81fb48ee44daedc887"
+source = "git+https://github.com/atelico/candle.git?rev=702160f2ee295e1b888d5565895e583a6d321c2b#702160f2ee295e1b888d5565895e583a6d321c2b"
 dependencies = [
  "accelerate-src",
  "byteorder",
@@ -591,6 +591,7 @@ dependencies = [
  "rand_distr 0.5.1",
  "rayon",
  "safetensors 0.6.0",
+ "sysinfo",
  "thiserror 1.0.69",
  "ug",
  "ug-cuda",
@@ -602,7 +603,7 @@ dependencies = [
 [[package]]
 name = "candle-flash-attn"
 version = "0.9.1"
-source = "git+https://github.com/atelico/candle.git?rev=947d3080218bdb6220c03b81fb48ee44daedc887#947d3080218bdb6220c03b81fb48ee44daedc887"
+source = "git+https://github.com/atelico/candle.git?rev=702160f2ee295e1b888d5565895e583a6d321c2b#702160f2ee295e1b888d5565895e583a6d321c2b"
 dependencies = [
  "anyhow",
  "bindgen_cuda 0.1.5",
@@ -613,7 +614,7 @@ dependencies = [
 [[package]]
 name = "candle-flash-attn-v3"
 version = "0.9.1"
-source = "git+https://github.com/atelico/candle.git?rev=947d3080218bdb6220c03b81fb48ee44daedc887#947d3080218bdb6220c03b81fb48ee44daedc887"
+source = "git+https://github.com/atelico/candle.git?rev=702160f2ee295e1b888d5565895e583a6d321c2b#702160f2ee295e1b888d5565895e583a6d321c2b"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -625,7 +626,7 @@ dependencies = [
 [[package]]
 name = "candle-kernels"
 version = "0.9.1"
-source = "git+https://github.com/atelico/candle.git?rev=947d3080218bdb6220c03b81fb48ee44daedc887#947d3080218bdb6220c03b81fb48ee44daedc887"
+source = "git+https://github.com/atelico/candle.git?rev=702160f2ee295e1b888d5565895e583a6d321c2b#702160f2ee295e1b888d5565895e583a6d321c2b"
 dependencies = [
  "bindgen_cuda 0.1.5",
 ]
@@ -633,7 +634,7 @@ dependencies = [
 [[package]]
 name = "candle-metal-kernels"
 version = "0.9.1"
-source = "git+https://github.com/atelico/candle.git?rev=947d3080218bdb6220c03b81fb48ee44daedc887#947d3080218bdb6220c03b81fb48ee44daedc887"
+source = "git+https://github.com/atelico/candle.git?rev=702160f2ee295e1b888d5565895e583a6d321c2b#702160f2ee295e1b888d5565895e583a6d321c2b"
 dependencies = [
  "half",
  "metal 0.27.0",
@@ -645,7 +646,7 @@ dependencies = [
 [[package]]
 name = "candle-nn"
 version = "0.9.1"
-source = "git+https://github.com/atelico/candle.git?rev=947d3080218bdb6220c03b81fb48ee44daedc887#947d3080218bdb6220c03b81fb48ee44daedc887"
+source = "git+https://github.com/atelico/candle.git?rev=702160f2ee295e1b888d5565895e583a6d321c2b#702160f2ee295e1b888d5565895e583a6d321c2b"
 dependencies = [
  "accelerate-src",
  "candle-core",

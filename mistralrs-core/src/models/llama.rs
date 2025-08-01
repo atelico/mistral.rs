@@ -1,6 +1,6 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use candle_core::{autorelease_block, Device, Result, Tensor};
+use candle_core::{autorelease_block_for_device, Device, Result, Tensor};
 use candle_nn::{Embedding, Module};
 use mistralrs_quant::{
     ColumnParallelLayer, QuantMethod, QuantizedConfig, ReplicatedLayer, RowParallelLayer,
@@ -520,7 +520,7 @@ impl Llama {
                 .unwrap_or(true)
         });
         for (block_idx, block) in self.blocks.iter().enumerate() {
-            autorelease_block!({
+            autorelease_block_for_device!(&self.device, {
                 x = self.mapper.map(x, block_idx)?;
                 x = block.forward(
                     &x,
