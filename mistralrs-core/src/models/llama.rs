@@ -1,6 +1,6 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use candle_core::{Device, Result, Tensor};
+use candle_core::{autorelease_block, Device, Result, Tensor};
 use candle_nn::{Embedding, Module};
 use mistralrs_quant::{
     ColumnParallelLayer, QuantMethod, QuantizedConfig, ReplicatedLayer, RowParallelLayer,
@@ -520,17 +520,19 @@ impl Llama {
                 .unwrap_or(true)
         });
         for (block_idx, block) in self.blocks.iter().enumerate() {
-            x = self.mapper.map(x, block_idx)?;
-            x = block.forward(
-                &x,
-                &mask.clone().map(|m| m.to_device(x.device()).unwrap()),
-                seqlen_offsets,
-                &mut cache[block_idx],
-                metadata
-                    .as_ref()
-                    .map(|(kv_cache, metadata)| (kv_cache[block_idx].clone(), *metadata)),
-                flash_params,
-            )?;
+            autorelease_block!({
+                x = self.mapper.map(x, block_idx)?;
+                x = block.forward(
+                    &x,
+                    &mask.clone().map(|m| m.to_device(x.device()).unwrap()),
+                    seqlen_offsets,
+                    &mut cache[block_idx],
+                    metadata
+                        .as_ref()
+                        .map(|(kv_cache, metadata)| (kv_cache[block_idx].clone(), *metadata)),
+                    flash_params,
+                )?;
+            })
         }
         let x = x.to_device(&self.device)?;
         let mut x = self.ln_f.forward(&x)?;
