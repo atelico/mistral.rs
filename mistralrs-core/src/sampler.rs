@@ -832,24 +832,28 @@ impl Sampler {
             }
             let next_token = if sample_speculative {
                 match self.temperature {
-                    None => self.sample_speculative_top_kp_min_p(
-                        logits,
-                        return_logprobs,
-                        self.top_k,
-                        self.top_p as f32,
-                        self.min_p as f32,
-                    )?,
-                    Some(temperature) => {
-                        let logits = (&logits / temperature)?;
-                        let probs = candle_nn::ops::softmax_last_dim(&logits)?;
-
+                    None => autorelease_block_for_device!(&logits.device(), {
                         self.sample_speculative_top_kp_min_p(
-                            probs,
+                            logits,
                             return_logprobs,
                             self.top_k,
                             self.top_p as f32,
                             self.min_p as f32,
                         )?
+                    }),
+                    Some(temperature) => {
+                        let logits = (&logits / temperature)?;
+                        let probs = candle_nn::ops::softmax_last_dim(&logits)?;
+
+                        autorelease_block_for_device!(&logits.device(), {
+                            self.sample_speculative_top_kp_min_p(
+                                probs,
+                                return_logprobs,
+                                self.top_k,
+                                self.top_p as f32,
+                                self.min_p as f32,
+                            )?
+                        })
                     }
                 }
             } else {
@@ -860,15 +864,17 @@ impl Sampler {
                         let logits = candle_nn::ops::softmax_last_dim(&logits)?;
                         let mut probs: Vec<f32> = logits.to_vec1()?;
 
-                        self.sample_top_kp_min_p(
-                            &mut probs,
-                            &logits,
-                            self.top_k,
-                            self.top_p as f32,
-                            self.min_p as f32,
-                            return_logprobs,
-                            rng,
-                        )?
+                        autorelease_block_for_device!(&logits.device(), {
+                            self.sample_top_kp_min_p(
+                                &mut probs,
+                                &logits,
+                                self.top_k,
+                                self.top_p as f32,
+                                self.min_p as f32,
+                                return_logprobs,
+                                rng,
+                            )?
+                        })
                     }
                 }
             };
