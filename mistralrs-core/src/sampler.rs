@@ -634,7 +634,9 @@ impl Sampler {
         return_logprobs: bool,
         rng: Arc<Mutex<Isaac64Rng>>,
     ) -> Result<Logprobs> {
-        let argsort_indices: Vec<u32> = logits.arg_sort_last_dim(false)?.to_vec1()?;
+        let argsort_indices: Vec<u32> = autorelease_block_for_device!(&logits.device(), {
+            logits.arg_sort_last_dim(false)?.to_vec1()?
+        });
 
         if top_k > 0 {
             // Clamp smaller probabilities to zero.
@@ -646,7 +648,9 @@ impl Sampler {
         }
 
         if top_p <= 0.0 || top_p >= 1.0 {
-            return self.sample_multinomial(probs, argsort_indices, return_logprobs, rng);
+            return autorelease_block_for_device!(&logits.device(), {
+                self.sample_multinomial(probs, argsort_indices, return_logprobs, rng)
+            });
         }
 
         // TOP P
@@ -666,7 +670,9 @@ impl Sampler {
         }
 
         if min_p <= 0.0 || min_p >= 1.0 {
-            return self.sample_multinomial(probs, argsort_indices, return_logprobs, rng);
+            return autorelease_block_for_device!(&logits.device(), {
+                self.sample_multinomial(probs, argsort_indices, return_logprobs, rng)
+            });
         }
 
         let max_p = probs[argsort_indices[0] as usize];
@@ -684,7 +690,9 @@ impl Sampler {
         }
 
         // Sample with clamped probabilities.
-        self.sample_multinomial(probs, argsort_indices, return_logprobs, rng)
+        autorelease_block_for_device!(&logits.device(), {
+            self.sample_multinomial(probs, argsort_indices, return_logprobs, rng)
+        })
     }
 
     fn apply_penalties(&self, mut logits: Vec<f32>, context: &[u32]) -> Result<Tensor> {
@@ -842,10 +850,10 @@ impl Sampler {
                         )?
                     }),
                     Some(temperature) => {
-                        let logits = (&logits / temperature)?;
-                        let probs = candle_nn::ops::softmax_last_dim(&logits)?;
-
                         autorelease_block_for_device!(&logits.device(), {
+                            let logits = (&logits / temperature)?;
+                            let probs = candle_nn::ops::softmax_last_dim(&logits)?;
+
                             self.sample_speculative_top_kp_min_p(
                                 probs,
                                 return_logprobs,
@@ -858,13 +866,15 @@ impl Sampler {
                 }
             } else {
                 match self.temperature {
-                    None => self.sample_argmax(logits, return_logprobs)?,
+                    None => autorelease_block_for_device!(&logits.device(), {
+                        self.sample_argmax(logits, return_logprobs)?
+                    }),
                     Some(temperature) => {
-                        let logits = (&logits / temperature)?;
-                        let logits = candle_nn::ops::softmax_last_dim(&logits)?;
-                        let mut probs: Vec<f32> = logits.to_vec1()?;
-
                         autorelease_block_for_device!(&logits.device(), {
+                            let logits = (&logits / temperature)?;
+                            let logits = candle_nn::ops::softmax_last_dim(&logits)?;
+                            let mut probs: Vec<f32> = logits.to_vec1()?;
+
                             self.sample_top_kp_min_p(
                                 &mut probs,
                                 &logits,
