@@ -664,6 +664,10 @@ pub trait Pipeline:
                         let raw_logits = autorelease_block_for_device!(&self.device(), {
                             self.forward_inputs(inputs, return_raw_logits)?
                         });
+                        autorelease_block_for_device!(&self.device(), {
+                            self.device().synchronize()?;
+                        });
+                        autorelease_block_for_device!(&self.device(), {});
 
                         let end = Instant::now();
                         exec_duration += end.duration_since(start);
