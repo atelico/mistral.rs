@@ -859,7 +859,9 @@ impl Sampler {
                     Some(temperature) => {
                         autorelease_block_for_device!(&logits_device, {
                             let logits = (&logits / temperature)?;
-                            let probs = candle_nn::ops::softmax_last_dim(&logits)?;
+                            let probs = autorelease_block_for_device!(&logits_device, {
+                                candle_nn::ops::softmax_last_dim(&logits)?
+                            });
 
                             self.sample_speculative_top_kp_min_p(
                                 probs,
