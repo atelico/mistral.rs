@@ -37,4 +37,4 @@ accelerate = ["mistralrs-core/accelerate"]
 mkl = ["mistralrs-core/mkl"]
 nccl = ["mistralrs-core/nccl"]
 ring = ["mistralrs-core/ring"]
-
+memory_debug = ["mistralrs-core/memory_debug"]

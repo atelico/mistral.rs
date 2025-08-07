@@ -55,7 +55,7 @@ once_cell.workspace = true
 toml.workspace = true
 strum.workspace = true
 image.workspace = true
-derive_more = { workspace = true}
+derive_more = { workspace = true }
 akin.workspace = true
 variantly.workspace = true
 tracing-subscriber.workspace = true
@@ -128,15 +128,20 @@ metal = [
     "dep:objc",
     "dep:mistralrs-paged-attn",
     "mistralrs-paged-attn/metal",
-    "dep:metal"
+    "dep:metal",
 ]
 flash-attn = ["cuda", "dep:candle-flash-attn"]
 flash-attn-v3 = ["cuda", "dep:candle-flash-attn-v3"]
-accelerate = ["candle-core/accelerate", "candle-nn/accelerate", "mistralrs-quant/accelerate"]
+accelerate = [
+    "candle-core/accelerate",
+    "candle-nn/accelerate",
+    "mistralrs-quant/accelerate",
+]
 mkl = ["candle-core/mkl", "candle-nn/mkl"]
 nccl = ["cuda", "mistralrs-quant/nccl"]
 utoipa = ["dep:utoipa"]
 ring = ["mistralrs-quant/ring"]
+memory_debug = ["candle-core/memory_debug"]
 
 [build-dependencies]
 bindgen_cuda = { workspace = true, optional = true }
