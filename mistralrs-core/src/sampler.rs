@@ -879,7 +879,9 @@ impl Sampler {
                     Some(temperature) => {
                         autorelease_block_for_device!(&logits_device, {
                             let logits = (&logits / temperature)?;
-                            let logits = candle_nn::ops::softmax_last_dim(&logits)?;
+                            let logits = autorelease_block_for_device!(&logits_device, {
+                                candle_nn::ops::softmax_last_dim(&logits)?
+                            });
                             let mut probs: Vec<f32> = logits.to_vec1()?;
 
                             self.sample_top_kp_min_p(
