@@ -844,6 +844,8 @@ impl Sampler {
                     processor.apply(&logits, context)?
                 });
             }
+            let logits_device = logits.device();
+
             // MEMORY HAS SPIKED BY NOW, I THINK
             let next_token = if sample_speculative {
                 match self.temperature {
@@ -883,13 +885,21 @@ impl Sampler {
                             let logits = (&logits / temperature)?;
                             #[cfg(feature = "memory_debug")]
                             println!(
-                                "Logits shape and device: {:?} {:?}",
+                                "Logits shape, layout, and device: {:?}, {:?}, {:?}",
                                 logits.shape(),
+                                logits.layout(),
                                 logits.device()
                             );
                             let logits = autorelease_block_for_device!(&logits_device, {
                                 candle_nn::ops::softmax_last_dim(&logits)?
                             });
+                            println!(
+                                "Logits shape, layout, and device: {:?}, {:?}, {:?}",
+                                logits.shape(),
+                                logits.layout(),
+                                logits.device()
+                            );
+
                             let mut probs: Vec<f32> =
                                 autorelease_block_for_device!(&logits.device(), {
                                     logits.to_vec1()?
