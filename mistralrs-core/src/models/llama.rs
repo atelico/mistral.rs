@@ -79,94 +79,124 @@ impl CausalSelfAttention {
         let original_dtype = x.dtype();
         let mut x = x.clone();
         if let Some(t) = self.q_proj.quantized_act_type() {
-            x = x.to_dtype(t)?;
+            autorelease_block_for_device!(x.device(), { x = x.to_dtype(t)? });
         }
-        let mut q = MatMul.qmethod_matmul(&x, &*self.q_proj)?;
-        let mut k = MatMul.qmethod_matmul(&x, &*self.k_proj)?;
-        let mut v = MatMul.qmethod_matmul(&x, &*self.v_proj)?;
+        let mut q = autorelease_block_for_device!(x.device(), {
+            MatMul.qmethod_matmul(&x, &*self.q_proj)?
+        });
+        let mut k = autorelease_block_for_device!(x.device(), {
+            MatMul.qmethod_matmul(&x, &*self.k_proj)?
+        });
+        let mut v = autorelease_block_for_device!(x.device(), {
+            MatMul.qmethod_matmul(&x, &*self.v_proj)?
+        });
         if self.q_proj.quantized_act_type().is_some() {
-            q = q.to_dtype(original_dtype)?;
-            k = k.to_dtype(original_dtype)?;
-            v = v.to_dtype(original_dtype)?;
+            autorelease_block_for_device!(x.device(), {
+                q = q.to_dtype(original_dtype)?;
+                k = k.to_dtype(original_dtype)?;
+                v = v.to_dtype(original_dtype)?;
+            });
         }
 
         let (q, k, v) = if seq_len != 1 {
-            let q = q
-                .reshape((b_sz, seq_len, self.num_attention_heads, self.head_dim))?
-                .transpose(1, 2)?;
-            let k = k
-                .reshape((b_sz, seq_len, self.num_key_value_heads, self.head_dim))?
-                .transpose(1, 2)?;
-            let v = v
-                .reshape((b_sz, seq_len, self.num_key_value_heads, self.head_dim))?
-                .transpose(1, 2)?;
-            (q, k, v)
+            autorelease_block_for_device!(x.device(), {
+                let q = q
+                    .reshape((b_sz, seq_len, self.num_attention_heads, self.head_dim))?
+                    .transpose(1, 2)?;
+                let k = k
+                    .reshape((b_sz, seq_len, self.num_key_value_heads, self.head_dim))?
+                    .transpose(1, 2)?;
+                let v = v
+                    .reshape((b_sz, seq_len, self.num_key_value_heads, self.head_dim))?
+                    .transpose(1, 2)?;
+                (q, k, v)
+            })
         } else {
-            let q = q.reshape((b_sz, self.num_attention_heads, seq_len, self.head_dim))?;
-            let k = k.reshape((b_sz, self.num_key_value_heads, seq_len, self.head_dim))?;
-            let v = v.reshape((b_sz, self.num_key_value_heads, seq_len, self.head_dim))?;
-            (q, k, v)
+            autorelease_block_for_device!(x.device(), {
+                let q = q.reshape((b_sz, self.num_attention_heads, seq_len, self.head_dim))?;
+                let k = k.reshape((b_sz, self.num_key_value_heads, seq_len, self.head_dim))?;
+                let v = v.reshape((b_sz, self.num_key_value_heads, seq_len, self.head_dim))?;
+                (q, k, v)
+            })
         };
 
-        let (q, k) = self.rotary_emb.forward(&q, &k, seqlen_offsets)?;
+        let (q, k) = autorelease_block_for_device!(x.device(), {
+            self.rotary_emb.forward(&q, &k, seqlen_offsets)?
+        });
 
         let mut y = match &self.paged_attn {
             Some(paged_attn) => match metadata {
-                Some(((key_cache, value_cache), input_metadata)) => paged_attn.forward(
-                    &q,
-                    &k,
-                    &v,
-                    attention_mask.clone().as_ref(),
-                    Some(key_cache),
-                    Some(value_cache),
-                    input_metadata,
-                    &self.sdpa_params,
-                    Some(flash_params),
-                )?,
+                Some(((key_cache, value_cache), input_metadata)) => {
+                    autorelease_block_for_device!(x.device(), {
+                        paged_attn.forward(
+                            &q,
+                            &k,
+                            &v,
+                            attention_mask.clone().as_ref(),
+                            Some(key_cache),
+                            Some(value_cache),
+                            input_metadata,
+                            &self.sdpa_params,
+                            Some(flash_params),
+                        )?
+                    })
+                }
                 None => {
                     // If we don't have metadata, we are most likely generating an imatrix so we don't want to populate that.
                     // Generating the dummy metadata with the assumption that we are not generating text (only processing prompts).
-                    let input_metadata = PagedAttentionInputMetadata::dummy(q.device())?;
-                    // Sanity check.
-                    assert!(attention_mask.is_some());
-                    paged_attn.forward(
+                    autorelease_block_for_device!(x.device(), {
+                        let input_metadata = PagedAttentionInputMetadata::dummy(q.device())?;
+                        // Sanity check.
+                        assert!(attention_mask.is_some());
+                        paged_attn.forward(
+                            &q,
+                            &k,
+                            &v,
+                            attention_mask.clone().as_ref(),
+                            None,
+                            None,
+                            &input_metadata,
+                            &self.sdpa_params,
+                            Some(flash_params),
+                        )?
+                    })
+                }
+            },
+            None => {
+                autorelease_block_for_device!(x.device(), {
+                    let (k, v) = kv_cache.append(&k, &v)?;
+
+                    Sdpa.run_attention(
                         &q,
                         &k,
                         &v,
                         attention_mask.clone().as_ref(),
-                        None,
-                        None,
-                        &input_metadata,
-                        &self.sdpa_params,
                         Some(flash_params),
+                        &self.sdpa_params,
                     )?
-                }
-            },
-            None => {
-                let (k, v) = kv_cache.append(&k, &v)?;
-
-                Sdpa.run_attention(
-                    &q,
-                    &k,
-                    &v,
-                    attention_mask.clone().as_ref(),
-                    Some(flash_params),
-                    &self.sdpa_params,
-                )?
+                })
             }
         };
 
         if let Some(t) = self.q_proj.quantized_act_type() {
-            y = y.to_dtype(t)?;
+            autorelease_block_for_device!(x.device(), {
+                y = y.to_dtype(t)?;
+            });
         }
-        y = if attention_mask.is_some() {
-            y.transpose(1, 2)?.reshape((b_sz, seq_len, ()))?
-        } else {
-            y.reshape((b_sz, seq_len, ()))?
-        };
-        let mut res = MatMul.qmethod_matmul(&y, &*self.o_proj)?;
+        y = autorelease_block_for_device!(x.device(), {
+            if attention_mask.is_some() {
+                y.transpose(1, 2)?.reshape((b_sz, seq_len, ()))?
+            } else {
+                y.reshape((b_sz, seq_len, ()))?
+            }
+        });
+        let mut res = autorelease_block_for_device!(x.device(), {
+            MatMul.qmethod_matmul(&y, &*self.o_proj)?
+        });
         if self.q_proj.quantized_act_type().is_some() {
-            res = res.to_dtype(original_dtype)?;
+            autorelease_block_for_device!(x.device(), {
+                res = res.to_dtype(original_dtype)?;
+            });
         }
         Ok(res)
     }
