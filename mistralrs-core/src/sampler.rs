@@ -894,7 +894,7 @@ impl Sampler {
                                 candle_nn::ops::softmax_last_dim(&logits)?
                             });
                             println!(
-                                "Logits shape, layout, and device: {:?}, {:?}, {:?}",
+                                "post softmaxLogits shape, layout, and device: {:?}, {:?}, {:?}",
                                 logits.shape(),
                                 logits.layout(),
                                 logits.device()
@@ -904,7 +904,12 @@ impl Sampler {
                                 autorelease_block_for_device!(&logits.device(), {
                                     logits.to_vec1()?
                                 });
-
+                            println!(
+                                "post vec1 Logits shape, layout, and device: {:?}, {:?}, {:?}",
+                                logits.shape(),
+                                logits.layout(),
+                                logits.device()
+                            );
                             self.sample_top_kp_min_p(
                                 &mut probs,
                                 &logits,
