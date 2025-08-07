@@ -1125,6 +1125,17 @@ impl Pipeline for NormalPipeline {
                 flash_meta_full.as_ref().unwrap_or(&flash_meta),
             )?,
         };
+        // ── Ensure the forward pass command buffer is committed & completed ──
+        #[cfg(feature = "metal")]
+        println!("[pipeline] forward done on {:?}", self.model.device());
+        #[cfg(feature = "metal")]
+        if let Device::Metal(dev) = self.model.device() {
+            // Commit the current command buffer (releases encoder‑held scratch).
+            dev.flush_command_buffer()?;
+            // Block until the GPU finishes this batch (frees scratch now).
+            dev.wait_until_completed()?;
+        }
+
         if return_raw_logits {
             Ok(ForwardInputsResult::RawLogits { logits })
         } else {
