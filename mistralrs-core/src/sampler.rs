@@ -833,14 +833,21 @@ impl Sampler {
             //         self.min_p,
             //     );
             // }
-            let logits = logits.to_vec1()?;
-            let mut logits = self.apply_penalties(logits, context)?;
+            // START OF MEMORY SPIKE IN SAMPLE ISSUES
+            let logits_device = logits.device();
+            let logits = autorelease_block_for_device!(&logits_device, { logits.to_vec1()? });
+            let mut logits = autorelease_block_for_device!(&logits_device, {
+                self.apply_penalties(logits, context)?
+            });
             for processor in &self.logits_processors {
-                logits = processor.apply(&logits, context)?;
+                logits = autorelease_block_for_device!(&logits_device, {
+                    processor.apply(&logits, context)?
+                });
             }
+            // MEMORY HAS SPIKED BY NOW, I THINK
             let next_token = if sample_speculative {
                 match self.temperature {
-                    None => autorelease_block_for_device!(&logits.device(), {
+                    None => autorelease_block_for_device!(&logits_device, {
                         self.sample_speculative_top_kp_min_p(
                             logits,
                             return_logprobs,
@@ -850,7 +857,7 @@ impl Sampler {
                         )?
                     }),
                     Some(temperature) => {
-                        autorelease_block_for_device!(&logits.device(), {
+                        autorelease_block_for_device!(&logits_device, {
                             let logits = (&logits / temperature)?;
                             let probs = candle_nn::ops::softmax_last_dim(&logits)?;
 
@@ -866,11 +873,11 @@ impl Sampler {
                 }
             } else {
                 match self.temperature {
-                    None => autorelease_block_for_device!(&logits.device(), {
+                    None => autorelease_block_for_device!(&logits_device, {
                         self.sample_argmax(logits, return_logprobs)?
                     }),
                     Some(temperature) => {
-                        autorelease_block_for_device!(&logits.device(), {
+                        autorelease_block_for_device!(&logits_device, {
                             let logits = (&logits / temperature)?;
                             let logits = candle_nn::ops::softmax_last_dim(&logits)?;
                             let mut probs: Vec<f32> = logits.to_vec1()?;
