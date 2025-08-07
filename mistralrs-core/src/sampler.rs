@@ -866,6 +866,7 @@ impl Sampler {
             // }
             // START OF MEMORY SPIKE IN SAMPLE ISSUES
             // ── theory‑1 instrumentation & mitigation ─────────────────────────────
+            let orig_tensor_device = logits.device();
             let logits_device = logits.device();
             #[cfg(feature = "memory_debug")]
             println!("Deivice type for logits: {:?}", logits_device);
@@ -986,6 +987,11 @@ impl Sampler {
                     }
                 }
             };
+            #[cfg(feature = "metal")]
+            if let Device::Metal(dev) = orig_tensor_device {
+                dev.flush_command_buffer()?; // commit + drop scratch buffers
+            }
+
             Ok(next_token)
         })
     }
