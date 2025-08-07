@@ -881,6 +881,12 @@ impl Sampler {
                     Some(temperature) => {
                         autorelease_block_for_device!(&logits_device, {
                             let logits = (&logits / temperature)?;
+                            #[cfg(feature = "memory_debug")]
+                            println!(
+                                "Logits shape and device: {:?} {:?}",
+                                logits.shape(),
+                                logits.device()
+                            );
                             let logits = autorelease_block_for_device!(&logits_device, {
                                 candle_nn::ops::softmax_last_dim(&logits)?
                             });
