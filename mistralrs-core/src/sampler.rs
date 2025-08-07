@@ -872,8 +872,9 @@ impl Sampler {
 
             // (1) Materialise only the narrow view into its own MTLBuffer so we
             //     never read back the 8‑GB parent buffer.
-            let slice_contig =
-                autorelease_block_for_device!(&logits_device, { logits.contiguous()? });
+            let slice_contig = logits
+                .narrow(D::Minus1, 0, logits.dim(D::Minus1)?)?
+                .contiguous()?; // Really allocates now
 
             // (2) Emit a one‑line diagnostic so we can see whether the storage is
             //     still orders‑of‑magnitude larger than the slice.
