@@ -141,7 +141,7 @@ mkl = ["candle-core/mkl", "candle-nn/mkl"]
 nccl = ["cuda", "mistralrs-quant/nccl"]
 utoipa = ["dep:utoipa"]
 ring = ["mistralrs-quant/ring"]
-memory_debug = ["candle-core/memory_debug"]
+memory_debug = ["candle-core/memory_debug", "candle-nn/memory_debug"]
 
 [build-dependencies]
 bindgen_cuda = { workspace = true, optional = true }
