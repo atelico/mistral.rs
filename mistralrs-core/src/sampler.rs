@@ -878,7 +878,13 @@ impl Sampler {
             log_slice_mb(&slice_contig, "after‑contiguous");
 
             // (3) Now it’s safe to copy to CPU memory.
-            let logits = slice_contig.to_vec1()?;
+            let logits = slice_contig.to_device(&Device::Cpu)?.to_vec1()?;
+
+            let first = autorelease_block_for_device!(&logits_device, {
+                unsafe { std::ptr::read(logits.as_ptr()) }
+            });
+            println!("first = {}", first);
+
             let mut logits = autorelease_block_for_device!(&logits_device, {
                 self.apply_penalties(logits, context)?
             });
