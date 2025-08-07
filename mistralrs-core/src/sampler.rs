@@ -867,6 +867,9 @@ impl Sampler {
             // START OF MEMORY SPIKE IN SAMPLE ISSUES
             // ── theory‑1 instrumentation & mitigation ─────────────────────────────
             let logits_device = logits.device();
+            #[cfg(feature = "memory_debug")]
+            println!("Deivice type for logits: {:?}", logits_device);
+
             // (1) Materialise only the narrow view into its own MTLBuffer so we
             //     never read back the 8‑GB parent buffer.
             let slice_contig =
