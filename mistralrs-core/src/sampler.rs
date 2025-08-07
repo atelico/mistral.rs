@@ -870,24 +870,30 @@ impl Sampler {
             #[cfg(feature = "memory_debug")]
             println!("Deivice type for logits: {:?}", logits_device);
 
-            // (1) Materialise only the narrow view into its own MTLBuffer so we
-            //     never read back the 8‑GB parent buffer.
-            let slice_contig = logits
-                .narrow(D::Minus1, 0, logits.dim(D::Minus1)?)?
-                .contiguous()?; // Really allocates now
+            // ── memory‑safe extraction of the last‑step logits ─────────────────────────
+            let vocab_len = logits.dim(D::Minus1)?;
 
-            // (2) Emit a one‑line diagnostic so we can see whether the storage is
-            //     still orders‑of‑magnitude larger than the slice.
-            #[cfg(feature = "memory_debug")]
-            log_slice_mb(&slice_contig, "after‑contiguous");
+            /* 1️⃣  Copy the very first logit (index 0) – costs only 4 bytes. */
+            let first_val: f32 = logits
+                .narrow(D::Minus1, 0, 1)? // shape [1]
+                .contiguous()? // forces a tiny new buffer
+                .to_device(&Device::Cpu)? // 4‑byte blit
+                .to_vec1()?[0];
 
-            // (3) Now it’s safe to copy to CPU memory.
-            let mut logits = slice_contig.to_device(&Device::Cpu)?.to_vec1()?;
+            /* 2️⃣  Copy the remaining logits  [1 .. vocab_len).              */
+            /*     contiguous() here allocates a new ~0.49 MB Metal buffer,   */
+            /*     so only that data get read back, never the 8 GB parent.    */
+            let slice_gpu = logits
+                .narrow(D::Minus1, 1, vocab_len - 1)? // drop the first token
+                .contiguous()?; // allocate new storage (~512 KiB)
 
-            let first = autorelease_block_for_device!(&logits_device, {
-                unsafe { std::ptr::read(logits.as_ptr()) }
-            });
-            println!("first = {}", first);
+            let mut logits = slice_gpu
+                .to_device(&Device::Cpu)? // 0.49 MB blit
+                .to_vec1()?;
+
+            /* 4️⃣  Re‑insert the first value so the vector is length = vocab_len
+            and in the original order. */
+            logits.insert(0, first_val); // O(vocab_len) once, fine.
 
             let mut logits = autorelease_block_for_device!(&logits_device, {
                 self.apply_penalties(logits, context)?
