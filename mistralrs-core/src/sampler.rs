@@ -987,10 +987,10 @@ impl Sampler {
                     }
                 }
             };
-            #[cfg(feature = "metal")]
-            if let Device::Metal(dev) = orig_tensor_device {
-                dev.flush_command_buffer()?; // commit + drop scratch buffers
-            }
+            // #[cfg(feature = "metal")]
+            // if let Device::Metal(dev) = orig_tensor_device {
+            //     dev.flush_command_buffer()?; // commit + drop scratch buffers
+            // }
 
             Ok(next_token)
         })
