@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use candle_core::{Context, Device, IndexOp, Result, Tensor, D};
+use candle_core::{autorelease_block, Context, Device, IndexOp, Result, Tensor, D};
 use candle_nn::Linear;
 
 use crate::{
@@ -634,21 +634,27 @@ impl ReplicatedLayer {
         let layer = if let Some(quant_conf) = &config {
             match quant_conf {
                 QuantizedConfig::GptqAwq { .. } => {
-                    gptq_linear(in_dim, out_dim, quant_conf, vb.clone())?
+                    autorelease_block!({ gptq_linear(in_dim, out_dim, quant_conf, vb.clone())? })
                 }
-                QuantizedConfig::Fp8 { .. } => blockwise_fp8_linear_b(
-                    in_dim,
-                    out_dim,
-                    quant_conf,
-                    bias,
-                    Default::default(),
-                    vb.clone(),
-                )?,
+                QuantizedConfig::Fp8 { .. } => autorelease_block!({
+                    blockwise_fp8_linear_b(
+                        in_dim,
+                        out_dim,
+                        quant_conf,
+                        bias,
+                        Default::default(),
+                        vb.clone(),
+                    )?
+                }),
                 QuantizedConfig::Bitsandbytes { .. } => {
-                    Arc::new(BnbLinear::linear_b(in_dim, out_dim, bias, vb.clone())?) as Arc<_>
+                    autorelease_block!({
+                        Arc::new(BnbLinear::linear_b(in_dim, out_dim, bias, vb.clone())?) as Arc<_>
+                    })
                 }
                 QuantizedConfig::Afq { .. } => {
-                    AfqLayer::afq_linear_b(in_dim, out_dim, quant_conf, bias, vb.clone())?
+                    autorelease_block!({
+                        AfqLayer::afq_linear_b(in_dim, out_dim, quant_conf, bias, vb.clone())?
+                    })
                 }
             }
         } else {
@@ -657,23 +663,29 @@ impl ReplicatedLayer {
                 let layer = <DummyLayer as QuantMethod>::new(QuantMethodConfig::Dummy)?;
                 Arc::new(layer) as Arc<dyn QuantMethod>
             } else {
-                let weight = vb.get_with_hints((out_dim, in_dim), "weight", Default::default())?;
-                let weight = merge_lora_weights(&vb, weight, in_dim, out_dim, Default::default())?;
+                autorelease_block!({
+                    let weight =
+                        vb.get_with_hints((out_dim, in_dim), "weight", Default::default())?;
+                    let weight = autorelease_block!({
+                        merge_lora_weights(&vb, weight, in_dim, out_dim, Default::default())?
+                    });
 
-                let bias = if bias {
-                    Some(vb.get_with_hints((out_dim,), "bias", Default::default())?)
-                } else {
-                    None
-                };
-                let layer = <UnquantLinear as QuantMethod>::new(QuantMethodConfig::Unquantized(
-                    Linear::new(weight, bias),
-                ))?;
-                Arc::new(layer) as Arc<dyn QuantMethod>
+                    let bias = if bias {
+                        Some(vb.get_with_hints((out_dim,), "bias", Default::default())?)
+                    } else {
+                        None
+                    };
+                    let layer = <UnquantLinear as QuantMethod>::new(
+                        QuantMethodConfig::Unquantized(Linear::new(weight, bias)),
+                    )?;
+                    Arc::new(layer) as Arc<dyn QuantMethod>
+                })
             }
         };
 
         let this_unquant = Arc::new(Self(layer));
-        let this: Arc<dyn QuantMethod> = apply_immediate_isq(this_unquant, base_vb)?;
+        let this: Arc<dyn QuantMethod> =
+            autorelease_block!({ apply_immediate_isq(this_unquant, base_vb)? });
         Ok(this)
     }
 

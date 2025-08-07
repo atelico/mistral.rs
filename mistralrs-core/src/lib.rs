@@ -1,4 +1,5 @@
 #![deny(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+use candle_core::autorelease_block_for_device;
 use candle_core::Device;
 use engine::Engine;
 pub use engine::{
@@ -572,8 +573,10 @@ impl MistralRs {
 
         // Create the engine instance
         let engine_instance =
-            Self::create_engine_instance(pipeline.clone(), method, engine_config, reboot_state)
-                .expect("Failed to create engine instance");
+            autorelease_block_for_device!(&pipeline.try_lock().unwrap().device(), {
+                Self::create_engine_instance(pipeline.clone(), method, engine_config, reboot_state)
+                    .expect("Failed to create engine instance")
+            });
 
         let id = pipeline.try_lock().unwrap().name();
 

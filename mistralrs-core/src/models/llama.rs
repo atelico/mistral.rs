@@ -1,6 +1,6 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use candle_core::{autorelease_block_for_device, Device, Result, Tensor};
+use candle_core::{autorelease_block, autorelease_block_for_device, Device, Result, Tensor};
 use candle_nn::{Embedding, Module};
 use mistralrs_quant::{
     ColumnParallelLayer, QuantMethod, QuantizedConfig, ReplicatedLayer, RowParallelLayer,
@@ -371,31 +371,39 @@ impl Llama {
         }
         let mapper = normal_loading_metadata.mapper;
 
-        let wte = embedding(
-            cfg.vocab_size,
-            cfg.hidden_size,
-            mapper.set_nm_device(vb_m.pp("embed_tokens"), false),
-            &cfg.quantization_config,
-        )?;
-        let lm_head = if !cfg.tie_word_embeddings {
-            ReplicatedLayer::new(
-                cfg.hidden_size,
+        let wte = autorelease_block!({
+            embedding(
                 cfg.vocab_size,
+                cfg.hidden_size,
+                mapper.set_nm_device(vb_m.pp("embed_tokens"), false),
                 &cfg.quantization_config,
-                false,
-                mapper.set_nm_device(vb_lm_head, normal_loading_metadata.loading_isq),
             )?
+        });
+        let lm_head = if !cfg.tie_word_embeddings {
+            autorelease_block!({
+                ReplicatedLayer::new(
+                    cfg.hidden_size,
+                    cfg.vocab_size,
+                    &cfg.quantization_config,
+                    false,
+                    mapper.set_nm_device(vb_lm_head, normal_loading_metadata.loading_isq),
+                )?
+            })
         } else {
-            ReplicatedLayer::from_linear(candle_nn::Linear::new(
-                mapper.cast_nm_device(wte.embeddings(), normal_loading_metadata.loading_isq)?,
-                None,
-            ))?
+            autorelease_block!({
+                ReplicatedLayer::from_linear(candle_nn::Linear::new(
+                    mapper.cast_nm_device(wte.embeddings(), normal_loading_metadata.loading_isq)?,
+                    None,
+                ))?
+            })
         };
-        let ln_f = RmsNorm::new(
-            cfg.hidden_size,
-            cfg.rms_norm_eps,
-            mapper.set_nm_device(vb_m.pp("norm"), false),
-        )?;
+        let ln_f = autorelease_block!({
+            RmsNorm::new(
+                cfg.hidden_size,
+                cfg.rms_norm_eps,
+                mapper.set_nm_device(vb_m.pp("norm"), false),
+            )?
+        });
         let head_dim = cfg.hidden_size / cfg.num_attention_heads;
         let mut ropes = HashMap::new();
         for i in 0..cfg.num_hidden_layers {
@@ -404,12 +412,9 @@ impl Llama {
                 .unwrap_or(&normal_loading_metadata.real_device);
             ropes.insert(
                 device.location(),
-                Arc::new(Llama3RotaryEmbedding::new_llama3(
-                    vb_m.dtype(),
-                    cfg,
-                    device,
-                    is_gptx,
-                )?),
+                Arc::new(autorelease_block!({
+                    Llama3RotaryEmbedding::new_llama3(vb_m.dtype(), cfg, device, is_gptx)?
+                })),
             );
         }
         let blocks: Vec<_> = NiceProgressBar::<_, 'b'>(
@@ -427,21 +432,23 @@ impl Llama {
                 .clone();
             let paged_attn = match &attention_mechanism {
                 AttentionImplementation::Eager => None,
-                AttentionImplementation::PagedAttention => {
-                    Some(PagedAttention::new(head_dim, device, None)?)
-                }
+                AttentionImplementation::PagedAttention => Some(autorelease_block!({
+                    PagedAttention::new(head_dim, device, None)?
+                })),
             };
             let comm = mapper.get_comm_for(i)?;
-            Block::load(
-                vb_m.pp(format!("layers.{i}")),
-                cfg,
-                &*mapper,
-                i,
-                normal_loading_metadata.loading_isq,
-                rotary_emb,
-                paged_attn,
-                &comm,
-            )
+            autorelease_block!({
+                Block::load(
+                    vb_m.pp(format!("layers.{i}")),
+                    cfg,
+                    &*mapper,
+                    i,
+                    normal_loading_metadata.loading_isq,
+                    rotary_emb,
+                    paged_attn,
+                    &comm,
+                )
+            })
         })?;
 
         Ok(Self {
@@ -449,10 +456,12 @@ impl Llama {
             blocks,
             ln_f,
             lm_head,
-            kv_cache: EitherCache::Normal(NormalCache::new(
-                cfg.num_hidden_layers,
-                cfg.max_position_embeddings,
-            )),
+            kv_cache: autorelease_block!({
+                EitherCache::Normal(NormalCache::new(
+                    cfg.num_hidden_layers,
+                    cfg.max_position_embeddings,
+                ))
+            }),
             device: normal_loading_metadata.real_device,
             cfg: ModelConfigMetadata {
                 max_seq_len: cfg.max_position_embeddings,
@@ -503,15 +512,17 @@ impl Llama {
     ) -> Result<Tensor> {
         let mut x = input_embeds;
         let cache = &mut self.kv_cache.normal().0;
-        let mask = CausalMasker.make_causal_mask_matrix(
-            input_ids,
-            metadata
-                .as_ref()
-                .map(|(_, _)| &seqlen_offsets as &dyn PastKvLenCache)
-                .unwrap_or(cache as &dyn PastKvLenCache),
-            x.dtype(),
-            self.blocks[0].attn.num_attention_heads,
-        )?;
+        let mask = autorelease_block!({
+            CausalMasker.make_causal_mask_matrix(
+                input_ids,
+                metadata
+                    .as_ref()
+                    .map(|(_, _)| &seqlen_offsets as &dyn PastKvLenCache)
+                    .unwrap_or(cache as &dyn PastKvLenCache),
+                x.dtype(),
+                self.blocks[0].attn.num_attention_heads,
+            )?
+        });
         // PagedAttention prompt chunking
         let mask = mask.filter(|_| {
             metadata
@@ -534,13 +545,13 @@ impl Llama {
                 )?;
             })
         }
-        let x = x.to_device(&self.device)?;
-        let mut x = self.ln_f.forward(&x)?;
+        let x = autorelease_block!({ x.to_device(&self.device)? });
+        let mut x = autorelease_block!({ self.ln_f.forward(&x)? });
         if let Some(t) = self.lm_head.quantized_act_type() {
-            x = x.to_dtype(t)?;
+            x = autorelease_block!({ x.to_dtype(t)? });
         }
-        let xs = MatMul.qmethod_matmul(&x, &*self.lm_head)?;
-        extract_logits(&xs, context_lens)
+        let xs = autorelease_block!({ MatMul.qmethod_matmul(&x, &*self.lm_head)? });
+        autorelease_block!({ extract_logits(&xs, context_lens) })
     }
 
     pub fn residual_tensors_m(&self, uvb_m: UnVarBuilder) -> Vec<(String, Tensor)> {
@@ -553,7 +564,7 @@ impl Llama {
             uvb_l.pp("post_attention_layernorm").add(&layer.rms_2);
         }
 
-        uvb_m.to_safetensors()
+        autorelease_block!({ uvb_m.to_safetensors() })
     }
 }
 
@@ -585,7 +596,7 @@ impl IsqModel for Llama {
 
     fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let uvb = UnVarBuilder::new();
-        self.residual_tensors_m(uvb.pp("model"))
+        autorelease_block!({ self.residual_tensors_m(uvb.pp("model")) })
     }
 
     fn imatrix_names(&self) -> candle_core::Result<Vec<Option<String>>> {

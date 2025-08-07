@@ -356,18 +356,20 @@ impl Engine {
 
         let tokenizer = get_mut_arcmutex!(self.pipeline).tokenizer();
 
-        let sampler = Sampler::new(
-            Some(request.sampling_params.temperature.unwrap_or(1.0)),
-            request.sampling_params.top_n_logprobs,
-            tokenizer,
-            request.sampling_params.frequency_penalty,
-            request.sampling_params.presence_penalty,
-            request.sampling_params.dry_params,
-            topk,
-            topp,
-            minp,
-            request.logits_processors.unwrap_or_default(),
-        );
+        let sampler = autorelease_block_for_device!(&get_mut_arcmutex!(self.pipeline).device(), {
+            Sampler::new(
+                Some(request.sampling_params.temperature.unwrap_or(1.0)),
+                request.sampling_params.top_n_logprobs,
+                tokenizer,
+                request.sampling_params.frequency_penalty,
+                request.sampling_params.presence_penalty,
+                request.sampling_params.dry_params,
+                topk,
+                topp,
+                minp,
+                request.logits_processors.unwrap_or_default(),
+            )
+        });
         let sampler = handle_seq_error!(sampler, request.response);
 
         if request.sampling_params.n_choices == 0 {
