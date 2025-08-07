@@ -884,7 +884,10 @@ impl Sampler {
                             let logits = autorelease_block_for_device!(&logits_device, {
                                 candle_nn::ops::softmax_last_dim(&logits)?
                             });
-                            let mut probs: Vec<f32> = logits.to_vec1()?;
+                            let mut probs: Vec<f32> =
+                                autorelease_block_for_device!(&logits.device(), {
+                                    logits.to_vec1()?
+                                });
 
                             self.sample_top_kp_min_p(
                                 &mut probs,

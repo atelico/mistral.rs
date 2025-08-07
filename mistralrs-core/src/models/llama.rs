@@ -264,17 +264,21 @@ impl Block {
         flash_params: &FlashParams,
     ) -> Result<Tensor> {
         let residual = x;
-        let x = self.rms_1.forward(x)?;
-        let x = (self.attn.forward(
-            &x,
-            attention_mask,
-            seqlen_offsets,
-            kv_cache,
-            metadata,
-            flash_params,
-        )? + residual)?;
+        let x = autorelease_block_for_device!(&x.device(), { self.rms_1.forward(x)? });
+        let x = (autorelease_block_for_device!(&x.device(), {
+            self.attn.forward(
+                &x,
+                attention_mask,
+                seqlen_offsets,
+                kv_cache,
+                metadata,
+                flash_params,
+            )?
+        }) + residual)?;
         let residual = &x;
-        let x = (self.mlp.forward(&self.rms_2.forward(&x)?)? + residual)?;
+        let x = autorelease_block_for_device!(&x.device(), {
+            self.mlp.forward(&self.rms_2.forward(&x)?)? + residual
+        })?;
         Ok(x)
     }
 
@@ -532,17 +536,28 @@ impl Llama {
         });
         for (block_idx, block) in self.blocks.iter().enumerate() {
             autorelease_block_for_device!(&self.device, {
-                x = self.mapper.map(x, block_idx)?;
-                x = block.forward(
-                    &x,
-                    &mask.clone().map(|m| m.to_device(x.device()).unwrap()),
-                    seqlen_offsets,
-                    &mut cache[block_idx],
-                    metadata
-                        .as_ref()
-                        .map(|(kv_cache, metadata)| (kv_cache[block_idx].clone(), *metadata)),
-                    flash_params,
-                )?;
+                x = autorelease_block_for_device!(&self.device, { self.mapper.map(x, block_idx)? });
+                x = autorelease_block_for_device!(&self.device, {
+                    block.forward(
+                        &x,
+                        &mask.clone().map(|m| {
+                            autorelease_block_for_device!(&self.device, {
+                                m.to_device(x.device()).unwrap()
+                            })
+                        }),
+                        seqlen_offsets,
+                        &mut cache[block_idx],
+                        metadata.as_ref().map(|(kv_cache, metadata)| {
+                            (
+                                autorelease_block_for_device!(&self.device, {
+                                    kv_cache[block_idx].clone()
+                                }),
+                                *metadata,
+                            )
+                        }),
+                        flash_params,
+                    )?
+                });
             })
         }
         let x = autorelease_block!({ x.to_device(&self.device)? });
