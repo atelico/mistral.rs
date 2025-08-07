@@ -20,6 +20,16 @@ use tokenizers::Tokenizer;
 static DRY_SEQUENCE_BREAKERS: Lazy<Vec<String>> =
     Lazy::new(|| ["\n", ":", "\"", "*"].map(String::from).to_vec());
 
+#[cfg(feature = "memory_debug")]
+#[inline(always)]
+fn log_slice_mb(t: &Tensor, tag: &str) {
+    let bytes = t.shape().elem_count() * t.dtype().size_in_bytes();
+    println!(
+        "[sampler] {tag}: logical slice = {:.2} MB",
+        bytes as f32 / (1024.0 * 1024.0),
+    );
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 /// Stop sequences or ids.
 pub enum StopTokens {
@@ -855,8 +865,20 @@ impl Sampler {
             //     );
             // }
             // START OF MEMORY SPIKE IN SAMPLE ISSUES
+            // ── theory‑1 instrumentation & mitigation ─────────────────────────────
             let logits_device = logits.device();
-            let logits = autorelease_block_for_device!(&logits_device, { logits.to_vec1()? });
+            // (1) Materialise only the narrow view into its own MTLBuffer so we
+            //     never read back the 8‑GB parent buffer.
+            let slice_contig =
+                autorelease_block_for_device!(&logits_device, { logits.contiguous()? });
+
+            // (2) Emit a one‑line diagnostic so we can see whether the storage is
+            //     still orders‑of‑magnitude larger than the slice.
+            #[cfg(feature = "memory_debug")]
+            log_slice_mb(&slice_contig, "after‑contiguous");
+
+            // (3) Now it’s safe to copy to CPU memory.
+            let logits = slice_contig.to_vec1()?;
             let mut logits = autorelease_block_for_device!(&logits_device, {
                 self.apply_penalties(logits, context)?
             });
@@ -920,11 +942,15 @@ impl Sampler {
                                 logits.layout(),
                                 logits.device()
                             );
+                            // compact & log before CPU pull‑back
+                            let logits_cpu = autorelease_block_for_device!(&logits.device(), {
+                                let c = logits.contiguous()?;
+                                #[cfg(feature = "memory_debug")]
+                                log_slice_mb(&c, "softmax‑output");
+                                c
+                            });
 
-                            let mut probs: Vec<f32> =
-                                autorelease_block_for_device!(&logits.device(), {
-                                    logits.to_vec1()?
-                                });
+                            let mut probs: Vec<f32> = logits_cpu.to_vec1()?;
                             println!(
                                 "post vec1 Logits shape, layout, and device: {:?}, {:?}, {:?}",
                                 logits.shape(),
