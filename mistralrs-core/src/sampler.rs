@@ -700,14 +700,35 @@ impl Sampler {
             candle_core::bail!("Penalty context is empty, this should not happen.");
         }
 
+        #[cfg(feature = "memory_debug")]
+        println!(
+            "Logits and context sizing before penalties: logits {}, context {}",
+            logits.len(),
+            context.len()
+        );
+
         // Dry penalty
-        self.apply_dry_penalty(&mut logits, context)?;
+        autorelease_block_for_device!(&Device::Cpu, {
+            self.apply_dry_penalty(&mut logits, context)?
+        });
 
         // Frequency and Presence penalty
-        self.apply_freq_presc_penalty(&mut logits, context)?;
+        autorelease_block_for_device!(&Device::Cpu, {
+            self.apply_freq_presc_penalty(&mut logits, context)?
+        });
 
         let vocab_size = logits.len();
-        Tensor::from_vec(logits, vocab_size, &Device::Cpu)
+
+        #[cfg(feature = "memory_debug")]
+        println!(
+            "Creating logits tensor after penalties with vobab size {} and logits size {}",
+            vocab_size,
+            logits.len()
+        );
+
+        autorelease_block_for_device!(&Device::Cpu, {
+            Tensor::from_vec(logits, vocab_size, &Device::Cpu)
+        })
     }
 
     fn apply_freq_presc_penalty(&self, logits: &mut [f32], context: &[u32]) -> Result<()> {
