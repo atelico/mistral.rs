@@ -295,6 +295,11 @@ impl Block {
     ) -> Result<Tensor> {
         let residual = x;
         let x = autorelease_block_for_device!(&x.device(), { self.rms_1.forward(x)? });
+        #[cfg(feature = "metal")]
+        if let Device::Metal(dev) = input_ids.device() {
+            dev.flush_command_buffer()?;
+        };
+
         let x = autorelease_block_for_device!(&x.device(), {
             (self.attn.forward(
                 &x,
@@ -305,10 +310,18 @@ impl Block {
                 flash_params,
             )? + residual)?
         });
+        #[cfg(feature = "metal")]
+        if let Device::Metal(dev) = input_ids.device() {
+            dev.flush_command_buffer()?;
+        };
         let residual = &x;
         let x = autorelease_block_for_device!(&x.device(), {
             self.mlp.forward(&self.rms_2.forward(&x)?)? + residual
         })?;
+        #[cfg(feature = "metal")]
+        if let Device::Metal(dev) = input_ids.device() {
+            dev.flush_command_buffer()?;
+        };
         Ok(x)
     }
 
@@ -587,38 +600,50 @@ impl Llama {
                 }
             });
 
-            x = autorelease_block_for_device!(&self.device, {
-                block.forward(
-                    &x,
-                    &attn_mask_for_block,
-                    // &mask.clone().map(|m| {
-                    //     autorelease_block_for_device!(&self.device, {
-                    //         m.to_device(x.device()).unwrap()
-                    //     })
-                    // }),
-                    seqlen_offsets,
-                    &mut cache[block_idx],
-                    metadata.as_ref().map(|(kv_cache, metadata)| {
-                        (
-                            autorelease_block_for_device!(&self.device, {
-                                kv_cache[block_idx].clone()
-                            }),
-                            *metadata,
-                        )
-                    }),
-                    flash_params,
-                )?
-            });
+            x = block.forward(
+                &x,
+                &attn_mask_for_block,
+                // &mask.clone().map(|m| {
+                //     autorelease_block_for_device!(&self.device, {
+                //         m.to_device(x.device()).unwrap()
+                //     })
+                // }),
+                seqlen_offsets,
+                &mut cache[block_idx],
+                metadata.as_ref().map(|(kv_cache, metadata)| {
+                    (
+                        autorelease_block_for_device!(&self.device, {
+                            kv_cache[block_idx].clone()
+                        }),
+                        *metadata,
+                    )
+                }),
+                flash_params,
+            )?;
+
             #[cfg(feature = "metal")]
             if let Device::Metal(dev) = input_ids.device() {
                 dev.flush_command_buffer()?;
             };
         }
         let x = autorelease_block_for_device!(&self.device, { x.to_device(&self.device)? });
+        #[cfg(feature = "metal")]
+        if let Device::Metal(dev) = input_ids.device() {
+            dev.flush_command_buffer()?;
+        };
+
         let mut x = autorelease_block_for_device!(&self.device, { self.ln_f.forward(&x)? });
+        #[cfg(feature = "metal")]
+        if let Device::Metal(dev) = input_ids.device() {
+            dev.flush_command_buffer()?;
+        };
         if let Some(t) = self.lm_head.quantized_act_type() {
             x = autorelease_block_for_device!(&self.device, { x.to_dtype(t)? });
         }
+        #[cfg(feature = "metal")]
+        if let Device::Metal(dev) = input_ids.device() {
+            dev.flush_command_buffer()?;
+        };
         let xs = autorelease_block_for_device!(&self.device, {
             MatMul.qmethod_matmul(&x, &*self.lm_head)?
         });
@@ -626,7 +651,12 @@ impl Llama {
         if let Device::Metal(dev) = input_ids.device() {
             dev.flush_command_buffer()?;
         };
-        autorelease_block_for_device!(&self.device, { extract_logits(&xs, context_lens) })
+        let res = extract_logits(&xs, context_lens);
+        #[cfg(feature = "metal")]
+        if let Device::Metal(dev) = input_ids.device() {
+            dev.flush_command_buffer()?;
+        };
+        res
     }
 
     pub fn residual_tensors_m(&self, uvb_m: UnVarBuilder) -> Vec<(String, Tensor)> {
