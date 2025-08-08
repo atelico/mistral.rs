@@ -296,7 +296,7 @@ impl Block {
         let residual = x;
         let x = autorelease_block_for_device!(&x.device(), { self.rms_1.forward(x)? });
         #[cfg(feature = "metal")]
-        if let Device::Metal(dev) = input_ids.device() {
+        if let Device::Metal(dev) = x.device() {
             dev.flush_command_buffer()?;
         };
 
@@ -311,7 +311,7 @@ impl Block {
             )? + residual)?
         });
         #[cfg(feature = "metal")]
-        if let Device::Metal(dev) = input_ids.device() {
+        if let Device::Metal(dev) = x.device() {
             dev.flush_command_buffer()?;
         };
         let residual = &x;
@@ -319,7 +319,7 @@ impl Block {
             self.mlp.forward(&self.rms_2.forward(&x)?)? + residual
         })?;
         #[cfg(feature = "metal")]
-        if let Device::Metal(dev) = input_ids.device() {
+        if let Device::Metal(dev) = x.device() {
             dev.flush_command_buffer()?;
         };
         Ok(x)
