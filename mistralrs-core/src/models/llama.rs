@@ -524,16 +524,14 @@ impl Llama {
         metadata: Option<(Vec<(Tensor, Tensor)>, &PagedAttentionInputMetadata)>,
         flash_params: &FlashParams,
     ) -> Result<Tensor> {
-        autorelease_block_for_device!(&self.device, {
-            self.forward_embeds(
-                input_ids,
-                self.wte.forward(input_ids)?,
-                seqlen_offsets,
-                context_lens,
-                metadata,
-                flash_params,
-            )
-        })
+        self.forward_embeds(
+            input_ids,
+            self.wte.forward(input_ids)?,
+            seqlen_offsets,
+            context_lens,
+            metadata,
+            flash_params,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -560,6 +558,10 @@ impl Llama {
                 // self.blocks[0].attn.num_attention_heads,
             )?
         });
+        #[cfg(feature = "metal")]
+        if let Device::Metal(dev) = input_ids.device() {
+            dev.flush_command_buffer()?;
+        };
         // PagedAttention prompt chunking
         let mask = mask.filter(|_| {
             metadata
@@ -571,44 +573,46 @@ impl Llama {
         let mut mask_per_loc: HashMap<_, Tensor> = HashMap::new();
 
         for (block_idx, block) in self.blocks.iter().enumerate() {
-            autorelease_block_for_device!(&self.device, {
-                x = autorelease_block_for_device!(&self.device, { self.mapper.map(x, block_idx)? });
-                // Get a mask on the same device as `x` (or None).
-                let attn_mask_for_block: Option<Tensor> = mask.clone().map(|m| {
-                    let dev = x.device();
-                    let loc = dev.location();
-                    if let Some(cached) = mask_per_loc.get(&loc) {
-                        cached.clone()
-                    } else {
-                        let moved = m.to_device(dev).unwrap();
-                        mask_per_loc.insert(loc, moved.clone());
-                        moved
-                    }
-                });
+            x = autorelease_block_for_device!(&self.device, { self.mapper.map(x, block_idx)? });
+            // Get a mask on the same device as `x` (or None).
+            let attn_mask_for_block: Option<Tensor> = mask.clone().map(|m| {
+                let dev = x.device();
+                let loc = dev.location();
+                if let Some(cached) = mask_per_loc.get(&loc) {
+                    cached.clone()
+                } else {
+                    let moved = m.to_device(dev).unwrap();
+                    mask_per_loc.insert(loc, moved.clone());
+                    moved
+                }
+            });
 
-                x = autorelease_block_for_device!(&self.device, {
-                    block.forward(
-                        &x,
-                        &attn_mask_for_block,
-                        // &mask.clone().map(|m| {
-                        //     autorelease_block_for_device!(&self.device, {
-                        //         m.to_device(x.device()).unwrap()
-                        //     })
-                        // }),
-                        seqlen_offsets,
-                        &mut cache[block_idx],
-                        metadata.as_ref().map(|(kv_cache, metadata)| {
-                            (
-                                autorelease_block_for_device!(&self.device, {
-                                    kv_cache[block_idx].clone()
-                                }),
-                                *metadata,
-                            )
-                        }),
-                        flash_params,
-                    )?
-                });
-            })
+            x = autorelease_block_for_device!(&self.device, {
+                block.forward(
+                    &x,
+                    &attn_mask_for_block,
+                    // &mask.clone().map(|m| {
+                    //     autorelease_block_for_device!(&self.device, {
+                    //         m.to_device(x.device()).unwrap()
+                    //     })
+                    // }),
+                    seqlen_offsets,
+                    &mut cache[block_idx],
+                    metadata.as_ref().map(|(kv_cache, metadata)| {
+                        (
+                            autorelease_block_for_device!(&self.device, {
+                                kv_cache[block_idx].clone()
+                            }),
+                            *metadata,
+                        )
+                    }),
+                    flash_params,
+                )?
+            });
+            #[cfg(feature = "metal")]
+            if let Device::Metal(dev) = input_ids.device() {
+                dev.flush_command_buffer()?;
+            };
         }
         let x = autorelease_block_for_device!(&self.device, { x.to_device(&self.device)? });
         let mut x = autorelease_block_for_device!(&self.device, { self.ln_f.forward(&x)? });
@@ -618,6 +622,10 @@ impl Llama {
         let xs = autorelease_block_for_device!(&self.device, {
             MatMul.qmethod_matmul(&x, &*self.lm_head)?
         });
+        #[cfg(feature = "metal")]
+        if let Device::Metal(dev) = input_ids.device() {
+            dev.flush_command_buffer()?;
+        };
         autorelease_block_for_device!(&self.device, { extract_logits(&xs, context_lens) })
     }
 
