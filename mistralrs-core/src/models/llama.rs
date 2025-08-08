@@ -554,7 +554,8 @@ impl Llama {
                     .map(|(_, _)| &seqlen_offsets as &dyn PastKvLenCache)
                     .unwrap_or(cache as &dyn PastKvLenCache),
                 x.dtype(),
-                self.blocks[0].attn.num_attention_heads,
+                1,
+                // self.blocks[0].attn.num_attention_heads,
             )?
         });
         // PagedAttention prompt chunking
@@ -564,17 +565,34 @@ impl Llama {
                 .map(|(_, meta)| meta.is_first_prompt_chunk)
                 .unwrap_or(true)
         });
+
+        let mut mask_per_loc: HashMap<_, Tensor> = HashMap::new();
+
         for (block_idx, block) in self.blocks.iter().enumerate() {
             autorelease_block_for_device!(&self.device, {
                 x = autorelease_block_for_device!(&self.device, { self.mapper.map(x, block_idx)? });
+                // Get a mask on the same device as `x` (or None).
+                let attn_mask_for_block: Option<Tensor> = mask.clone().map(|m| {
+                    let dev = x.device();
+                    let loc = dev.location();
+                    if let Some(cached) = mask_per_loc.get(&loc) {
+                        cached.clone()
+                    } else {
+                        let moved = m.to_device(dev).unwrap();
+                        mask_per_loc.insert(loc, moved.clone());
+                        moved
+                    }
+                });
+
                 x = autorelease_block_for_device!(&self.device, {
                     block.forward(
                         &x,
-                        &mask.clone().map(|m| {
-                            autorelease_block_for_device!(&self.device, {
-                                m.to_device(x.device()).unwrap()
-                            })
-                        }),
+                        &attn_mask_for_block,
+                        // &mask.clone().map(|m| {
+                        //     autorelease_block_for_device!(&self.device, {
+                        //         m.to_device(x.device()).unwrap()
+                        //     })
+                        // }),
                         seqlen_offsets,
                         &mut cache[block_idx],
                         metadata.as_ref().map(|(kv_cache, metadata)| {
@@ -590,13 +608,15 @@ impl Llama {
                 });
             })
         }
-        let x = autorelease_block!({ x.to_device(&self.device)? });
-        let mut x = autorelease_block!({ self.ln_f.forward(&x)? });
+        let x = autorelease_block_for_device!(&self.device, { x.to_device(&self.device)? });
+        let mut x = autorelease_block_for_device!(&self.device, { self.ln_f.forward(&x)? });
         if let Some(t) = self.lm_head.quantized_act_type() {
-            x = autorelease_block!({ x.to_dtype(t)? });
+            x = autorelease_block_for_device!(&self.device, { x.to_dtype(t)? });
         }
-        let xs = autorelease_block!({ MatMul.qmethod_matmul(&x, &*self.lm_head)? });
-        autorelease_block!({ extract_logits(&xs, context_lens) })
+        let xs = autorelease_block_for_device!(&self.device, {
+            MatMul.qmethod_matmul(&x, &*self.lm_head)?
+        });
+        autorelease_block_for_device!(&self.device, { extract_logits(&xs, context_lens) })
     }
 
     pub fn residual_tensors_m(&self, uvb_m: UnVarBuilder) -> Vec<(String, Tensor)> {
