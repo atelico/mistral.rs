@@ -295,16 +295,16 @@ impl Block {
     ) -> Result<Tensor> {
         let residual = x;
         let x = autorelease_block_for_device!(&x.device(), { self.rms_1.forward(x)? });
-        let x = (autorelease_block_for_device!(&x.device(), {
-            self.attn.forward(
+        let x = autorelease_block_for_device!(&x.device(), {
+            (self.attn.forward(
                 &x,
                 attention_mask,
                 seqlen_offsets,
                 kv_cache,
                 metadata,
                 flash_params,
-            )?
-        }) + residual)?;
+            )? + residual)?
+        });
         let residual = &x;
         let x = autorelease_block_for_device!(&x.device(), {
             self.mlp.forward(&self.rms_2.forward(&x)?)? + residual
@@ -524,14 +524,16 @@ impl Llama {
         metadata: Option<(Vec<(Tensor, Tensor)>, &PagedAttentionInputMetadata)>,
         flash_params: &FlashParams,
     ) -> Result<Tensor> {
-        self.forward_embeds(
-            input_ids,
-            self.wte.forward(input_ids)?,
-            seqlen_offsets,
-            context_lens,
-            metadata,
-            flash_params,
-        )
+        autorelease_block_for_device!(&self.device, {
+            self.forward_embeds(
+                input_ids,
+                self.wte.forward(input_ids)?,
+                seqlen_offsets,
+                context_lens,
+                metadata,
+                flash_params,
+            )
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
